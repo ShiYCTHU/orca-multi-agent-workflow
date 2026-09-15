@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+set -e
+source "$HOME/.config/dsh/orca.env"
+exec dsh "$@"

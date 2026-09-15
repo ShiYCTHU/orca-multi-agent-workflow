@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+set -e
+export ORCA_SUPERVISOR_MODE=1
+exec claude \
+  --model opus \
+  --dangerously-skip-permissions \
+  "$@"

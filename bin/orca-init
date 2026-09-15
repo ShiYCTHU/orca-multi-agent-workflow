@@ -1,0 +1,57 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+if project_root="$(git rev-parse --show-toplevel 2>/dev/null)"; then
+  :
+else
+  project_root="$PWD"
+fi
+
+workflow="$project_root/docs/multi_agent_workflow.md"
+claude_file="$project_root/CLAUDE.md"
+
+mkdir -p "$project_root/docs"
+
+if [[ -e "$workflow" ]]; then
+  echo "SKIP: $workflow already exists"
+else
+  cat >"$workflow" <<'DOC'
+# Project Multi-Agent Workflow
+
+## Architecture
+
+- Supervisor: deterministic `orca-supervisor` v1.1; owns long waits.
+- Runtime Coordinator: short-lived KIMI via `ORCA_SUPERVISOR_MODE=1 orca-kimi`.
+- Executor: Claude via `worker-start --agent claude`; Claude Code owns its configured GLM backend.
+- Independent Reviewer: DSH / DeepSeek via `dsh-orca --profile headless "<review task>"`.
+- Strategic Arbitrator: GPT-5.6 Terra, only after `SUPERVISOR_ESCALATE_TERRA`.
+- Legacy: GPT-5.6 Luna / `orca-luna`; never select it as the default Coordinator.
+
+## Project onboarding
+
+Before real work, record the build/test commands, protected paths, dirty worktree state, file ownership, acceptance criteria, data boundaries, and authorization for commits, deployments, worktrees, destructive actions, and expensive jobs.
+
+Preserve unrelated work and unknown/other-project processes. Do not duplicate active Runs, Tasks, Dispatches, workers, reviews, monitors, or long-running jobs.
+
+Project instructions define what must be achieved. The global `orca-multi-agent` skill defines how it is coordinated.
+DOC
+  echo "CREATE: $workflow"
+fi
+
+if [[ -e "$claude_file" ]]; then
+  echo "SKIP: $claude_file already exists"
+else
+  cat >"$claude_file" <<'DOC'
+# Claude Executor Instructions
+
+You are the bounded implementation Executor, not the Runtime Coordinator or independent Reviewer.
+
+Read `docs/multi_agent_workflow.md`, preserve the dirty worktree, follow the assigned Orca Task/Dispatch scope and acceptance criteria, use Claude Code's configured backend, validate your work, and return one valid `worker_done` through the assigned Dispatch context.
+
+Do not redefine goals, expand scope, modify unauthorized files, self-approve independent review, or pass a provider model override through Orca.
+DOC
+  echo "CREATE: $claude_file"
+fi
+
+echo 'Project layer ready.'
+echo 'Next: ORCA_SUPERVISOR_MODE=1 orca-kimi'

@@ -1,0 +1,654 @@
+#!/usr/bin/env python3
+
+import argparse
+import fcntl
+import hashlib
+import os
+from pathlib import Path
+import shutil
+import signal
+import subprocess
+import sys
+import time
+from datetime import datetime
+
+VERSION = "1.1"
+
+DEFAULT_COORDINATOR = "kimi"
+DEFAULT_ARBITRATOR = "terra"
+
+DEFAULT_WAIT_SEC = 60
+DEFAULT_AUDIT_MIN = 60
+
+EVENT_RETRY_SEC = 300
+CHECK_ERROR_LIMIT = 3
+
+stop_requested = False
+
+
+def now():
+    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+
+def say(msg):
+    print(f"[{now()}] {msg}", flush=True)
+
+
+def safe_name(text):
+    return "".join(
+        c if c.isalnum() or c in "._-" else "_"
+        for c in text
+    )
+
+
+def request_stop(signum, frame):
+    global stop_requested
+    stop_requested = True
+    say("Stop requested; workers/reviewers will NOT be touched.")
+
+
+def require_binary(name):
+    path = shutil.which(name)
+    if not path:
+        raise SystemExit(f"ERROR: required command not found: {name}")
+    return path
+
+
+def coordinator_prompt(run_id, project, reason, event_text):
+    excerpt = event_text[-4000:] if event_text else "(none)"
+
+    return f"""
+You are the SHORT-LIVED KIMI Runtime Coordinator managed by
+Deterministic Orca Supervisor v1.1.
+
+ORCA_SUPERVISOR_MODE=1
+
+Project:
+{project}
+
+Existing authoritative Orca Run:
+{run_id}
+
+Wake reason:
+{reason}
+
+Observed event excerpt:
+{excerpt}
+
+The deterministic Python Supervisor owns all waiting and lifecycle polling.
+
+DO NOT remain alive waiting for workers or reviewers.
+DO NOT repeatedly poll Orca.
+DO NOT create a new Run.
+
+Perform exactly ONE bounded coordination turn.
+
+You may use orca-ide commands to inspect durable state and take the smallest
+necessary orchestration action.
+
+Required behavior:
+
+1. Inspect the SAME Run, pending messages, Tasks, Dispatches, worker/reviewer
+   state, current phase and acceptance gate.
+2. Handle relevant worker_done, question or escalation events.
+3. Acknowledge deliveries only after handling them.
+4. Preserve active work and durable evidence.
+5. Never duplicate an active Task, Dispatch, worker or reviewer.
+6. If a phase passes, advance only to the next authorized phase.
+7. If revision is required, create/recover only the smallest bounded repair.
+8. Once a long-running worker/reviewer is active, RETURN immediately.
+9. Do not wait for that work to finish.
+
+Cross-project resource isolation is mandatory.
+Do not manipulate UNKNOWN_OWNERSHIP or OTHER_RUN_OR_PROJECT processes.
+
+DSH reviewer rule:
+use only
+dsh-orca --profile headless "<review task>"
+and never raw dsh.
+
+Routine lifecycle decisions should be handled by you.
+
+Escalate to GPT-5.6 Terra ONLY when genuine strategic arbitration is needed,
+for example:
+
+- durable Orca state is materially contradictory and cannot be safely resolved;
+- Executor and independent Reviewer provide conflicting technical evidence;
+- repeated bounded revisions fail to converge and the next architecture is unclear;
+- a major numerical/physical architecture decision is required;
+- you cannot safely determine the next gate from available evidence.
+
+Do NOT escalate merely for:
+- an active worker;
+- normal PASS/REVISE;
+- ordinary recovery;
+- RESOURCE_PRESSURE;
+- CLI/authentication problems with a known procedural fix;
+- a missing user authorization that should simply be returned to the user.
+
+Your FINAL line must be exactly one of:
+
+SUPERVISOR_RETURN_ACTIVE
+SUPERVISOR_RETURN_ADVANCED
+SUPERVISOR_RETURN_USER_ACTION
+SUPERVISOR_RETURN_TERMINAL
+SUPERVISOR_RETURN_BLOCKED
+SUPERVISOR_ESCALATE_TERRA
+
+Then exit immediately.
+""".strip()
+
+
+def terra_prompt(run_id, project, reason, kimi_result, event_text):
+    excerpt = event_text[-3000:] if event_text else "(none)"
+    kimi_excerpt = kimi_result[-5000:] if kimi_result else "(none)"
+
+    return f"""
+You are GPT-5.6 Terra acting as a HIGH-COST STRATEGIC ARBITRATOR.
+
+You are invoked only because the KIMI Runtime Coordinator explicitly
+requested strategic escalation.
+
+ORCA_SUPERVISOR_MODE=1
+
+Project:
+{project}
+
+Existing authoritative Orca Run:
+{run_id}
+
+Wake reason:
+{reason}
+
+KIMI coordinator result:
+{kimi_excerpt}
+
+Original event excerpt:
+{excerpt}
+
+Inspect durable Orca state yourself before acting.
+
+Do NOT create a new Run.
+Do NOT redo completed work.
+Do NOT remain alive waiting for workers.
+Do NOT weaken numerical/physical acceptance criteria merely to close a gate.
+
+Resolve the ambiguity or conflict with the smallest safe orchestration action.
+
+You may:
+- adjudicate conflicting evidence;
+- define the smallest repair/review task;
+- resolve a lifecycle contradiction;
+- return a clearly justified user-action blocker.
+
+Once the next long-running work is active, RETURN immediately.
+
+Cross-project resource isolation and DSH launcher discipline remain mandatory.
+
+Your FINAL line must be exactly one of:
+
+SUPERVISOR_RETURN_ACTIVE
+SUPERVISOR_RETURN_ADVANCED
+SUPERVISOR_RETURN_USER_ACTION
+SUPERVISOR_RETURN_TERMINAL
+SUPERVISOR_RETURN_BLOCKED
+
+Then exit.
+""".strip()
+
+
+def parse_status(text):
+    statuses = (
+        "SUPERVISOR_RETURN_ACTIVE",
+        "SUPERVISOR_RETURN_ADVANCED",
+        "SUPERVISOR_RETURN_USER_ACTION",
+        "SUPERVISOR_RETURN_TERMINAL",
+        "SUPERVISOR_RETURN_BLOCKED",
+        "SUPERVISOR_ESCALATE_TERRA",
+    )
+
+    for status in statuses:
+        if status in text:
+            return status
+
+    return None
+
+
+def run_kimi(args, state_dir, reason, event_text=""):
+    timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    log_path = state_dir / f"kimi-{timestamp}.log"
+
+    prompt = coordinator_prompt(
+        args.run,
+        args.project,
+        reason,
+        event_text,
+    )
+
+    env = os.environ.copy()
+    env["ORCA_SUPERVISOR_MODE"] = "1"
+    env["ORCA_SUPERVISOR_RUN"] = args.run
+    env["ORCA_SUPERVISOR_PROJECT"] = args.project
+
+    cmd = [
+        "claude",
+        "--model",
+        "opus",
+        "--dangerously-skip-permissions",
+        "-p",
+        prompt,
+    ]
+
+    say(f"Invoking KIMI coordinator: reason={reason}")
+
+    proc = subprocess.run(
+        cmd,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        env=env,
+        cwd=args.project,
+    )
+
+    output = proc.stdout or ""
+    log_path.write_text(output, errors="replace")
+
+    if output.strip():
+        print("\n----- KIMI result -----")
+        print(output[-6000:])
+        print("----- end KIMI result -----\n")
+
+    if proc.returncode != 0:
+        say(
+            f"KIMI exited non-zero ({proc.returncode}); "
+            f"log={log_path}"
+        )
+        return None, output
+
+    return parse_status(output), output
+
+
+def run_terra(args, state_dir, reason, kimi_result, event_text=""):
+    timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    log_path = state_dir / f"terra-{timestamp}.log"
+    last_path = state_dir / f"terra-last-{timestamp}.txt"
+
+    prompt = terra_prompt(
+        args.run,
+        args.project,
+        reason,
+        kimi_result,
+        event_text,
+    )
+
+    env = os.environ.copy()
+    env["ORCA_SUPERVISOR_MODE"] = "1"
+    env["ORCA_SUPERVISOR_RUN"] = args.run
+    env["ORCA_SUPERVISOR_PROJECT"] = args.project
+
+    cmd = [
+        "codex",
+        "exec",
+        "--ephemeral",
+        "-m",
+        "gpt-5.6-terra",
+        "-s",
+        "danger-full-access",
+        "-C",
+        args.project,
+        "--color",
+        "never",
+        "-o",
+        str(last_path),
+        "-",
+    ]
+
+    say("KIMI requested strategic escalation; invoking GPT-5.6 Terra.")
+
+    with log_path.open("w") as log:
+        proc = subprocess.run(
+            cmd,
+            input=prompt,
+            text=True,
+            stdout=log,
+            stderr=subprocess.STDOUT,
+            env=env,
+        )
+
+    result = ""
+
+    try:
+        result = last_path.read_text(errors="replace")
+    except OSError:
+        pass
+
+    if result.strip():
+        print("\n----- Terra result -----")
+        print(result[-6000:])
+        print("----- end Terra result -----\n")
+
+    if proc.returncode != 0:
+        say(
+            f"Terra exited non-zero ({proc.returncode}); "
+            f"log={log_path}"
+        )
+        return None, result
+
+    return parse_status(result), result
+
+
+def coordinate(args, state_dir, reason, event_text=""):
+    status, kimi_output = run_kimi(
+        args,
+        state_dir,
+        reason,
+        event_text,
+    )
+
+    if status == "SUPERVISOR_ESCALATE_TERRA":
+        if args.arbitrator == "none":
+            say("KIMI requested Terra but arbitrator is disabled.")
+            return "SUPERVISOR_RETURN_USER_ACTION"
+
+        status, _ = run_terra(
+            args,
+            state_dir,
+            reason,
+            kimi_output,
+            event_text,
+        )
+
+    return status
+
+
+def wait_for_event(args):
+    cmd = [
+        "orca-ide",
+        "orchestration",
+        "check",
+        "--run",
+        args.run,
+        "--peek",
+        "--wait",
+        "--types",
+        "worker_done,escalation,question",
+        "--timeout-ms",
+        str(args.wait_sec * 1000),
+        "--json",
+    ]
+
+    try:
+        proc = subprocess.run(
+            cmd,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=args.wait_sec + 30,
+        )
+    except subprocess.TimeoutExpired:
+        return None, None, None
+
+    if proc.returncode != 0:
+        return None, None, (proc.stderr or proc.stdout or "").strip()
+
+    payload = proc.stdout.strip()
+
+    if not payload:
+        return None, None, None
+
+    digest = hashlib.sha256(
+        payload.encode("utf-8", errors="replace")
+    ).hexdigest()
+
+    return payload, digest, None
+
+
+def should_stop_for_status(status):
+    return status in {
+        "SUPERVISOR_RETURN_USER_ACTION",
+        "SUPERVISOR_RETURN_TERMINAL",
+        "SUPERVISOR_RETURN_BLOCKED",
+    }
+
+
+def self_test():
+    print(f"Orca Supervisor v{VERSION} self-test")
+
+    required = ("python3", "orca-ide", "claude", "codex")
+
+    failed = False
+
+    for binary in required:
+        path = shutil.which(binary)
+        print(f"{binary:12s}: {path or 'MISSING'}")
+        failed |= path is None
+
+    if failed:
+        return 1
+
+    print("coordinator    : KIMI via Claude Code --model opus")
+    print("executor       : unchanged Orca Claude route / GLM config")
+    print("reviewer       : DSH / DeepSeek")
+    print("arbitrator     : GPT-5.6 Terra, explicit escalation only")
+    print("default audit  : 60 min")
+    print("process kill   : NEVER")
+    print("SELF_TEST: PASS")
+    return 0
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description=(
+            "Deterministic Orca Supervisor v1.1: "
+            "KIMI routine coordinator + optional GPT-5.6 Terra arbitrator."
+        )
+    )
+
+    parser.add_argument("--run")
+    parser.add_argument("--project", default=os.getcwd())
+
+    parser.add_argument(
+        "--coordinator",
+        choices=("kimi",),
+        default="kimi",
+    )
+
+    parser.add_argument(
+        "--arbitrator",
+        choices=("terra", "none"),
+        default="terra",
+    )
+
+    parser.add_argument(
+        "--wait-sec",
+        type=int,
+        default=DEFAULT_WAIT_SEC,
+    )
+
+    parser.add_argument(
+        "--audit-min",
+        type=int,
+        default=DEFAULT_AUDIT_MIN,
+    )
+
+    parser.add_argument(
+        "--no-initial-kick",
+        action="store_true",
+    )
+
+    parser.add_argument(
+        "--self-test",
+        action="store_true",
+    )
+
+    args = parser.parse_args()
+
+    if args.self_test:
+        return self_test()
+
+    if not args.run:
+        parser.error("--run is required")
+
+    args.project = os.path.realpath(
+        os.path.expanduser(args.project)
+    )
+
+    if not os.path.isdir(args.project):
+        raise SystemExit(
+            f"ERROR: project does not exist: {args.project}"
+        )
+
+    for binary in ("orca-ide", "claude", "codex"):
+        require_binary(binary)
+
+    run_key = safe_name(args.run)
+
+    state_dir = (
+        Path.home()
+        / ".local"
+        / "state"
+        / "orca-supervisor"
+        / run_key
+    )
+
+    state_dir.mkdir(parents=True, exist_ok=True)
+
+    lock_path = state_dir / "supervisor-v1.1.lock"
+    lock_file = lock_path.open("w")
+
+    try:
+        fcntl.flock(
+            lock_file.fileno(),
+            fcntl.LOCK_EX | fcntl.LOCK_NB,
+        )
+    except BlockingIOError:
+        raise SystemExit(
+            f"ERROR: Supervisor already active for {args.run}"
+        )
+
+    lock_file.write(str(os.getpid()))
+    lock_file.flush()
+
+    signal.signal(signal.SIGINT, request_stop)
+    signal.signal(signal.SIGTERM, request_stop)
+
+    say(f"Orca Supervisor v{VERSION} started")
+    say(f"Run         : {args.run}")
+    say(f"Project     : {args.project}")
+    say("Coordinator : KIMI / Kimi-K3[1M]")
+    say(f"Arbitrator  : {args.arbitrator}")
+    say(f"Audit       : {args.audit_min} min")
+    say("Ctrl+C stops only Supervisor.")
+
+    last_coordination = time.monotonic()
+    last_event_hash = None
+    last_event_coordination = 0.0
+    check_errors = 0
+
+    if not args.no_initial_kick:
+        status = coordinate(
+            args,
+            state_dir,
+            "SUPERVISOR_START_OR_RECOVERY",
+        )
+
+        last_coordination = time.monotonic()
+
+        if should_stop_for_status(status):
+            say(f"Supervisor pausing on state: {status}")
+            return 0
+
+    while not stop_requested:
+        event_text, event_hash, check_error = wait_for_event(args)
+
+        if stop_requested:
+            break
+
+        current = time.monotonic()
+
+        if check_error:
+            check_errors += 1
+
+            if check_errors < CHECK_ERROR_LIMIT:
+                say(
+                    f"Orca check error {check_errors}/"
+                    f"{CHECK_ERROR_LIMIT}; retrying without model call."
+                )
+                time.sleep(15)
+                continue
+
+            say(
+                "Repeated Orca check errors; asking KIMI once "
+                "to inspect durable state."
+            )
+
+            status = coordinate(
+                args,
+                state_dir,
+                "REPEATED_ORCA_CHECK_ERROR",
+                check_error,
+            )
+
+            check_errors = 0
+            last_coordination = time.monotonic()
+
+            if should_stop_for_status(status):
+                say(f"Supervisor pausing on state: {status}")
+                return 0
+
+            time.sleep(30)
+            continue
+
+        check_errors = 0
+
+        if event_text:
+            if (
+                event_hash == last_event_hash
+                and current - last_event_coordination
+                < EVENT_RETRY_SEC
+            ):
+                continue
+
+            status = coordinate(
+                args,
+                state_dir,
+                "ORCA_EVENT",
+                event_text,
+            )
+
+            last_event_hash = event_hash
+            last_event_coordination = time.monotonic()
+            last_coordination = last_event_coordination
+
+            if should_stop_for_status(status):
+                say(f"Supervisor pausing on state: {status}")
+                return 0
+
+            continue
+
+        if (
+            current - last_coordination
+            >= args.audit_min * 60
+        ):
+            status = coordinate(
+                args,
+                state_dir,
+                "PERIODIC_DURABLE_STATE_AUDIT",
+            )
+
+            last_coordination = time.monotonic()
+
+            if should_stop_for_status(status):
+                say(f"Supervisor pausing on state: {status}")
+                return 0
+
+    say(
+        "Supervisor stopped; workers, reviewers, Tasks, "
+        "Dispatches and Run were not stopped."
+    )
+
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
