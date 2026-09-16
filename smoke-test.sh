@@ -6,12 +6,17 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 bash -n "$ROOT/install.sh" "$ROOT"/bin/orca-{kimi,terra,init} "$ROOT/bin/dsh-orca"
 python3 - "$ROOT/bin/orca-supervisor" <<'PY'
 from pathlib import Path
+import os
 import sys
 from tempfile import TemporaryDirectory
 
 path = Path(sys.argv[1])
 namespace = {"__name__": "smoke_test"}
 exec(compile(path.read_text(), str(path), "exec"), namespace)
+assert namespace["orca_cli_name"]() == "orca-ide"
+os.environ["ORCA_CLI_COMMAND"] = "custom-orca"
+assert namespace["orca_cli_name"]() == "custom-orca"
+del os.environ["ORCA_CLI_COMMAND"]
 with TemporaryDirectory() as directory:
     lock_path = Path(directory) / "supervisor.lock"
     lock = namespace["acquire_lock"](lock_path, "smoke")

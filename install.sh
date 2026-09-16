@@ -26,8 +26,8 @@ target_for() {
 }
 
 check() {
-  local failed=0 command_name
-  for command_name in python3 orca-ide claude codex dsh; do
+  local failed=0 command_name orca_command="${ORCA_CLI_COMMAND:-orca-ide}"
+  for command_name in python3 "$orca_command" claude codex dsh; do
     if command -v "$command_name" >/dev/null; then
       printf 'OK      %s\n' "$command_name"
     else

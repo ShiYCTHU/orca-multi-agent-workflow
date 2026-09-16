@@ -57,7 +57,7 @@ function Remove-BinFromPath {
 
 if ($Check) {
     $missing = $false
-    foreach ($command in 'python', 'orca-ide', 'claude', 'codex', 'dsh') {
+    foreach ($command in 'python', 'orca', 'claude', 'codex', 'dsh') {
         if (Get-Command $command -ErrorAction SilentlyContinue) {
             Write-Host "OK      $command"
         } else {

@@ -58,6 +58,13 @@ def require_binary(name):
     return path
 
 
+def orca_cli_name():
+    return os.environ.get(
+        "ORCA_CLI_COMMAND",
+        "orca" if os.name == "nt" else "orca-ide",
+    )
+
+
 def acquire_lock(path, run_id):
     lock_file = path.open("a+b")
 
@@ -117,8 +124,8 @@ DO NOT create a new Run.
 
 Perform exactly ONE bounded coordination turn.
 
-You may use orca-ide commands to inspect durable state and take the smallest
-necessary orchestration action.
+Use the `ORCA_CLI_COMMAND` environment variable for Orca commands. Inspect
+durable state and take the smallest necessary orchestration action.
 
 Required behavior:
 
@@ -263,6 +270,7 @@ def run_kimi(args, state_dir, reason, event_text=""):
     env["ORCA_SUPERVISOR_MODE"] = "1"
     env["ORCA_SUPERVISOR_RUN"] = args.run
     env["ORCA_SUPERVISOR_PROJECT"] = args.project
+    env["ORCA_CLI_COMMAND"] = args.orca_cli
 
     cmd = [
         "claude",
@@ -319,6 +327,7 @@ def run_terra(args, state_dir, reason, kimi_result, event_text=""):
     env["ORCA_SUPERVISOR_MODE"] = "1"
     env["ORCA_SUPERVISOR_RUN"] = args.run
     env["ORCA_SUPERVISOR_PROJECT"] = args.project
+    env["ORCA_CLI_COMMAND"] = args.orca_cli
 
     cmd = [
         "codex",
@@ -397,7 +406,7 @@ def coordinate(args, state_dir, reason, event_text=""):
 
 def wait_for_event(args):
     cmd = [
-        "orca-ide",
+        args.orca_cli,
         "orchestration",
         "check",
         "--run",
@@ -448,12 +457,16 @@ def should_stop_for_status(status):
 def self_test():
     print(f"Orca Supervisor v{VERSION} self-test")
 
-    required = ("python3", "orca-ide", "claude", "codex")
+    required = (
+        ("python", sys.executable),
+        (orca_cli_name(), shutil.which(orca_cli_name())),
+        ("claude", shutil.which("claude")),
+        ("codex", shutil.which("codex")),
+    )
 
     failed = False
 
-    for binary in required:
-        path = shutil.which(binary)
+    for binary, path in required:
         print(f"{binary:12s}: {path or 'MISSING'}")
         failed |= path is None
 
@@ -532,7 +545,9 @@ def main():
             f"ERROR: project does not exist: {args.project}"
         )
 
-    for binary in ("orca-ide", "claude", "codex"):
+    args.orca_cli = require_binary(orca_cli_name())
+
+    for binary in ("claude", "codex"):
         require_binary(binary)
 
     run_key = safe_name(args.run)

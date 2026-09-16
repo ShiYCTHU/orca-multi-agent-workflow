@@ -29,7 +29,7 @@ No API keys, tokens, provider credentials, machine-specific project paths, or DS
 Install and authenticate these separately:
 
 - Windows 10/11 with PowerShell and Python 3, or Ubuntu with Bash and Python 3.
-- Orca, with `orca-ide` available in `PATH`.
+- Orca, with `orca` available in native Windows or `orca-ide` available in Ubuntu/WSL. Set `ORCA_CLI_COMMAND` only when your installation uses a different executable path.
 - Claude Code, with `claude` available in `PATH`. Configure its executor backend (currently GLM) in Claude Code itself.
 - Codex CLI, with `codex` available in `PATH` and access to `gpt-5.6-terra`.
 - DSH, with `dsh` available in `PATH`.
