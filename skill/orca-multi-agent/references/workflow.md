@@ -30,10 +30,15 @@ KIMI short-lived Runtime Coordinator (`orca-kimi`)
 
 The assistant should minimize manual user operations.
 
-Canonical Coordinator launch:
+Canonical Coordinator launch on Ubuntu/WSL:
 
     cd /real/project/path
     ORCA_SUPERVISOR_MODE=1 orca-kimi
+
+On Windows PowerShell:
+
+    Set-Location C:\real\project\path
+    $env:ORCA_SUPERVISOR_MODE='1'; orca-kimi
 
 The user then sends ONE consolidated task/bootstrap prompt.
 
@@ -55,7 +60,7 @@ After a real Run ID exists:
 
     orca-supervisor \
       --run REAL_RUN_ID \
-      --project /real/project/path \
+      --project REAL_PROJECT_PATH \
       --no-initial-kick
 
 The deterministic Supervisor owns all long waits.

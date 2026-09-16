@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 
 import argparse
-import fcntl
 import hashlib
 import os
 from pathlib import Path
@@ -11,6 +10,11 @@ import subprocess
 import sys
 import time
 from datetime import datetime
+
+if os.name == "nt":
+    import msvcrt
+else:
+    import fcntl
 
 VERSION = "1.1"
 
@@ -52,6 +56,36 @@ def require_binary(name):
     if not path:
         raise SystemExit(f"ERROR: required command not found: {name}")
     return path
+
+
+def acquire_lock(path, run_id):
+    lock_file = path.open("a+b")
+
+    try:
+        if os.name == "nt":
+            lock_file.seek(0, os.SEEK_END)
+            if lock_file.tell() == 0:
+                lock_file.write(b"\0")
+                lock_file.flush()
+            lock_file.seek(0)
+            msvcrt.locking(lock_file.fileno(), msvcrt.LK_NBLCK, 1)
+            lock_file.seek(1)
+        else:
+            fcntl.flock(
+                lock_file.fileno(),
+                fcntl.LOCK_EX | fcntl.LOCK_NB,
+            )
+            lock_file.seek(0)
+
+        lock_file.truncate()
+        lock_file.write(str(os.getpid()).encode())
+        lock_file.flush()
+        return lock_file
+    except (BlockingIOError, OSError):
+        lock_file.close()
+        raise SystemExit(
+            f"ERROR: Supervisor already active for {run_id}"
+        )
 
 
 def coordinator_prompt(run_id, project, reason, event_text):
@@ -503,31 +537,18 @@ def main():
 
     run_key = safe_name(args.run)
 
-    state_dir = (
-        Path.home()
-        / ".local"
-        / "state"
-        / "orca-supervisor"
-        / run_key
+    state_root = Path(
+        os.environ.get(
+            "LOCALAPPDATA",
+            Path.home() / ".local" / "state",
+        )
     )
+    state_dir = state_root / "orca-supervisor" / run_key
 
     state_dir.mkdir(parents=True, exist_ok=True)
 
     lock_path = state_dir / "supervisor-v1.1.lock"
-    lock_file = lock_path.open("w")
-
-    try:
-        fcntl.flock(
-            lock_file.fileno(),
-            fcntl.LOCK_EX | fcntl.LOCK_NB,
-        )
-    except BlockingIOError:
-        raise SystemExit(
-            f"ERROR: Supervisor already active for {args.run}"
-        )
-
-    lock_file.write(str(os.getpid()))
-    lock_file.flush()
+    lock_file = acquire_lock(lock_path, args.run)
 
     signal.signal(signal.SIGINT, request_stop)
     signal.signal(signal.SIGTERM, request_stop)

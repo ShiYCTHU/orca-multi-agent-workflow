@@ -74,11 +74,14 @@ Do not say vague things such as:
 
 For a fresh task, explicitly provide:
 
-### 可执行 Bash 命令
+### 可执行命令
 
-The command must explicitly launch:
+Use the command for the current platform:
 
-`ORCA_SUPERVISOR_MODE=1 orca-kimi`
+```text
+Ubuntu/WSL: ORCA_SUPERVISOR_MODE=1 orca-kimi
+Windows PowerShell: $env:ORCA_SUPERVISOR_MODE='1'; orca-kimi
+```
 
 from the real project directory.
 
@@ -86,7 +89,7 @@ Run `orca-init` first only if initialization is actually needed.
 
 Then provide exactly one consolidated block labelled:
 
-### 发给 KIMI 的文本（不是 Bash）
+### 发给 KIMI 的文本（不是命令）
 
 The KIMI bootstrap instruction must state that KIMI is a SHORT-LIVED
 Runtime Coordinator and must:
@@ -109,7 +112,7 @@ Normal final state:
 
 After the REAL Run ID is known, provide exactly one Supervisor command:
 
-`orca-supervisor --run REAL_RUN_ID --project /real/project/path --no-initial-kick`
+`orca-supervisor --run REAL_RUN_ID --project REAL_PROJECT_PATH --no-initial-kick`
 
 Never put a fake or placeholder Run ID in an executable command.
 

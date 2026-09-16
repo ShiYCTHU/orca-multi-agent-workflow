@@ -7,7 +7,21 @@ bash -n "$ROOT/install.sh" "$ROOT"/bin/orca-{kimi,terra,init} "$ROOT/bin/dsh-orc
 python3 - "$ROOT/bin/orca-supervisor" <<'PY'
 from pathlib import Path
 import sys
-compile(Path(sys.argv[1]).read_text(), sys.argv[1], "exec")
+from tempfile import TemporaryDirectory
+
+path = Path(sys.argv[1])
+namespace = {"__name__": "smoke_test"}
+exec(compile(path.read_text(), str(path), "exec"), namespace)
+with TemporaryDirectory() as directory:
+    lock_path = Path(directory) / "supervisor.lock"
+    lock = namespace["acquire_lock"](lock_path, "smoke")
+    try:
+        namespace["acquire_lock"](lock_path, "smoke")
+    except SystemExit:
+        pass
+    else:
+        raise AssertionError("duplicate supervisor lock was accepted")
+    lock.close()
 PY
 
 test -x "$ROOT/install.sh"
@@ -15,7 +29,7 @@ test -x "$ROOT/smoke-test.sh"
 test -x "$ROOT/bin/orca-supervisor"
 
 if grep -RIEq '/home/[^/]+|/Users/[^/]+|gh[pousr]_[[:alnum:]]{20,}|sk-[[:alnum:]_-]{20,}|AKIA[0-9A-Z]{16}|(api[_-]?key|token|secret|password)[[:space:]]*[:=][[:space:]]*[^$<[:space:]]+' \
-  "$ROOT/bin" "$ROOT/skill" "$ROOT/README.md"; then
+  "$ROOT/bin" "$ROOT/windows" "$ROOT/skill" "$ROOT/README.md" "$ROOT/install.ps1"; then
   echo 'FAIL: possible personal path or secret found' >&2
   exit 1
 fi

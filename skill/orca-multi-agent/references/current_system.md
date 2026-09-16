@@ -36,7 +36,13 @@ current task plan and project instructions.
 
 ## KIMI Coordinator
 
+Ubuntu/WSL:
+
     ORCA_SUPERVISOR_MODE=1 orca-kimi
+
+Windows PowerShell:
+
+    $env:ORCA_SUPERVISOR_MODE='1'; orca-kimi
 
 KIMI is short-lived.
 
@@ -79,16 +85,23 @@ Do not make the user manually coordinate phases.
 
 The assistant should normally output:
 
-## 可执行 Bash 命令
+## 可执行命令
+
+Ubuntu/WSL:
 
     cd /real/project/path
     ORCA_SUPERVISOR_MODE=1 orca-kimi
+
+Windows PowerShell:
+
+    Set-Location C:\real\project\path
+    $env:ORCA_SUPERVISOR_MODE='1'; orca-kimi
 
 Run `orca-init` first only if the project is not already initialized.
 
 Then:
 
-## 发给 KIMI 的文本（不是 Bash）
+## 发给 KIMI 的文本（不是命令）
 
 Provide ONE consolidated KIMI bootstrap task.
 
@@ -119,19 +132,20 @@ After the REAL Run ID is returned, provide:
 
     orca-supervisor \
       --run REAL_RUN_ID \
-      --project /real/project/path \
+      --project REAL_PROJECT_PATH \
       --no-initial-kick
 
 Never put a fake Run ID into an executable command.
 
 # Interrupted-task user experience
 
-For interrupted work:
+For interrupted work, use the platform-appropriate launch command above, then
+provide `SAME_RUN_RECOVERY`. On Ubuntu/WSL that launch is:
 
     cd /real/project/path
     ORCA_SUPERVISOR_MODE=1 orca-kimi
 
-Then provide ONE consolidated instruction containing:
+The consolidated instruction must contain:
 
     SAME_RUN_RECOVERY
 
