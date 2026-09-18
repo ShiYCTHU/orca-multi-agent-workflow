@@ -56,6 +56,7 @@ mkdir -p "$STATE_DIR"
 
 SAFE_RUN="$(printf '%s' "$RUN" | tr -c 'A-Za-z0-9_.-' '_')"
 DASH_LOG="$STATE_DIR/${SAFE_RUN}.log"
+PIDFILE="$STATE_DIR/${SAFE_RUN}.pid"
 
 echo
 echo "============================================================"
@@ -71,13 +72,14 @@ echo
 
 echo "Starting read-only Dashboard..."
 
-nohup orca-dashboard \
+setsid nohup orca-dashboard \
     --run "$RUN" \
     --project "$PROJECT" \
     --port "$PORT" \
     >"$DASH_LOG" 2>&1 < /dev/null &
 
 DASH_PID=$!
+printf '%s\n' "$DASH_PID" > "$PIDFILE"
 
 sleep 1
 
