@@ -5,7 +5,7 @@ Default Runtime Coordinator: KIMI
 
 This file contains the CURRENT workflow only.
 
-Historical Luna-based coordination rules are not active and are not packaged.
+Historical Luna-based coordination rules are archived and are not active.
 
 ## Current roles
 
@@ -30,15 +30,10 @@ KIMI short-lived Runtime Coordinator (`orca-kimi`)
 
 The assistant should minimize manual user operations.
 
-Canonical Coordinator launch on Ubuntu/WSL:
+Canonical Coordinator launch:
 
     cd /real/project/path
     ORCA_SUPERVISOR_MODE=1 orca-kimi
-
-On Windows PowerShell:
-
-    Set-Location C:\real\project\path
-    $env:ORCA_SUPERVISOR_MODE='1'; orca-kimi
 
 The user then sends ONE consolidated task/bootstrap prompt.
 
@@ -60,7 +55,7 @@ After a real Run ID exists:
 
     orca-supervisor \
       --run REAL_RUN_ID \
-      --project REAL_PROJECT_PATH \
+      --project /real/project/path \
       --no-initial-kick
 
 The deterministic Supervisor owns all long waits.
@@ -204,3 +199,140 @@ Long waits belong to the deterministic Supervisor, not KIMI.
 Global workflow defines HOW work is coordinated.
 
 Project task plans define WHAT must scientifically be achieved.
+
+<!-- ORCA_DASHBOARD_WORKFLOW_V1_START -->
+
+## Progress Dashboard lifecycle
+
+The active Orca workflow includes a read-only progress visualization layer.
+
+The lifecycle is:
+
+User
+-> KIMI creates fresh Run
+-> KIMI creates high-level progress manifest
+-> KIMI dispatches currently authorized Orca work
+-> KIMI returns SUPERVISOR_RETURN_ACTIVE
+-> deterministic Python Supervisor waits
+-> worker_done / question / escalation occurs
+-> Supervisor wakes a new bounded KIMI coordination turn
+-> KIMI inspects durable Orca state
+-> KIMI adjudicates the current gate
+-> KIMI updates the progress manifest
+-> KIMI dispatches next authorized work when appropriate
+-> KIMI returns a Supervisor-facing state
+
+The progress manifest lives at:
+
+<project>/.orca/progress/<run_id>.json
+
+The browser Dashboard reads this manifest through orca-dashboard.
+
+The Dashboard never owns lifecycle state.
+
+### Fresh Run
+
+After KIMI creates the real Run ID:
+
+1. define approximately 5-10 human-readable high-level phases;
+2. create the progress manifest using orca-progress init;
+3. mark already completed initialization work as completed;
+4. mark currently authorized work as active or ready;
+5. keep future high-level phases as planned;
+6. bind real Task, Dispatch, and Terminal identifiers when they exist.
+
+Creating a planned visual phase does not create an Orca Task.
+
+### Coordination turns
+
+During every later KIMI coordination turn:
+
+1. inspect durable Orca state first;
+2. identify the real current gate;
+3. update completed visual nodes with short evidence-grounded summaries;
+4. update active, revision, blocked, or escalated state as appropriate;
+5. bind newly created Task, Dispatch, and Terminal identifiers;
+6. update the manifest before returning control to the Supervisor.
+
+Do not infer completion from process disappearance alone.
+
+### Review and bounded repair
+
+Typical visual lifecycle:
+
+Implementation
+-> Validation
+-> Independent Review
+
+If Reviewer returns PASS:
+
+Independent Review
+-> Delivery
+
+If Reviewer returns CHANGES_REQUIRED:
+
+Independent Review
+-> Revision
+-> Validation
+-> Independent Review
+
+A repair loop does not require a new Run.
+
+The same high-level node may temporarily enter revision.
+
+If useful for human clarity, a bounded repair may also appear as a child node.
+
+### SAME_RUN_RECOVERY
+
+For interrupted existing work:
+
+- do not create a new Run merely to recreate a Dashboard;
+- inspect the existing durable Run;
+- reuse the existing progress manifest when present;
+- if the Run predates Dashboard support and no manifest exists, KIMI may reconstruct one from durable evidence;
+- reconstructed status must reflect verified durable state;
+- never mark historical phases completed without evidence.
+
+### FINALIZATION_INTERRUPTED
+
+If substantive work is already complete but lifecycle closure was interrupted:
+
+- preserve completed evidence;
+- mark the corresponding visual phase according to verified evidence;
+- repair only the missing lifecycle closure;
+- do not rerun completed CFD, validation, or review merely to make the Dashboard look complete.
+
+### Dashboard failure
+
+Dashboard failure is observability failure only.
+
+It must not:
+
+- stop workers;
+- stop Reviewers;
+- stop CFD;
+- change Run state;
+- create a new Run;
+- trigger Terra;
+- convert a healthy Run into BLOCKED.
+
+The Dashboard can be restarted independently with:
+
+orca-dashboard --run REAL_RUN_ID --project /absolute/project/path
+
+### Status vocabulary
+
+Only use:
+
+- planned
+- ready
+- active
+- completed
+- revision
+- blocked
+- escalated
+- skipped
+
+Do not show invented numeric percentages for active agents or simulations.
+
+<!-- ORCA_DASHBOARD_WORKFLOW_V1_END -->

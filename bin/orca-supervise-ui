@@ -1,0 +1,116 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+export PATH="$HOME/.local/bin:$PATH"
+
+RUN=""
+PROJECT=""
+PORT="8765"
+
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --run)
+            RUN="${2:-}"
+            shift 2
+            ;;
+        --project)
+            PROJECT="${2:-}"
+            shift 2
+            ;;
+        --port)
+            PORT="${2:-}"
+            shift 2
+            ;;
+        -h|--help)
+            echo "Usage:"
+            echo "  orca-supervise-ui --run RUN_ID --project /absolute/project/path [--port PORT]"
+            exit 0
+            ;;
+        *)
+            echo "ERROR: unknown argument: $1"
+            exit 2
+            ;;
+    esac
+done
+
+if [ -z "$RUN" ]; then
+    echo "ERROR: --run is required"
+    exit 2
+fi
+
+if [ -z "$PROJECT" ]; then
+    echo "ERROR: --project is required"
+    exit 2
+fi
+
+if [ ! -d "$PROJECT" ]; then
+    echo "ERROR: project directory does not exist:"
+    echo "  $PROJECT"
+    exit 1
+fi
+
+PROJECT="$(cd "$PROJECT" && pwd)"
+
+STATE_DIR="$HOME/.local/state/orca-dashboard"
+mkdir -p "$STATE_DIR"
+
+SAFE_RUN="$(printf '%s' "$RUN" | tr -c 'A-Za-z0-9_.-' '_')"
+DASH_LOG="$STATE_DIR/${SAFE_RUN}.log"
+
+echo
+echo "============================================================"
+echo " Orca Supervisor + Dashboard"
+echo "============================================================"
+echo
+echo "Run:"
+echo "  $RUN"
+echo
+echo "Project:"
+echo "  $PROJECT"
+echo
+
+echo "Starting read-only Dashboard..."
+
+nohup orca-dashboard \
+    --run "$RUN" \
+    --project "$PROJECT" \
+    --port "$PORT" \
+    >"$DASH_LOG" 2>&1 < /dev/null &
+
+DASH_PID=$!
+
+sleep 1
+
+if kill -0 "$DASH_PID" 2>/dev/null; then
+    echo "Dashboard started successfully."
+    echo "Dashboard PID:"
+    echo "  $DASH_PID"
+    echo "Dashboard log:"
+    echo "  $DASH_LOG"
+    echo
+    echo "Dashboard is independent of Supervisor lifecycle."
+    echo "It will remain available after Supervisor exits."
+else
+    echo "WARNING: Dashboard failed to start."
+    echo "Supervisor will still start normally."
+    echo
+    echo "Dashboard log:"
+    cat "$DASH_LOG" 2>/dev/null || true
+fi
+
+echo
+echo "Starting deterministic Orca Supervisor..."
+echo
+
+orca-supervisor \
+    --run "$RUN" \
+    --project "$PROJECT" \
+    --no-initial-kick
+
+SUPERVISOR_RC=$?
+
+echo
+echo "Orca Supervisor exited with code: $SUPERVISOR_RC"
+echo "Dashboard was intentionally left running."
+
+exit "$SUPERVISOR_RC"

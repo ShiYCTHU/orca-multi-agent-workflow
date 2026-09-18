@@ -1,0 +1,196 @@
+#!/usr/bin/env python3
+
+import argparse
+import datetime as dt
+import json
+import os
+import sys
+from pathlib import Path
+
+VALID_STATUSES = {
+    "planned",
+    "ready",
+    "active",
+    "completed",
+    "revision",
+    "blocked",
+    "escalated",
+    "skipped",
+}
+
+def now():
+    return dt.datetime.now(dt.timezone.utc).isoformat()
+
+def manifest_path(project, run_id):
+    project = Path(project).expanduser().resolve()
+    return project / ".orca" / "progress" / f"{run_id}.json"
+
+def atomic_write(path, data):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(path.name + f".tmp-{os.getpid()}")
+    tmp.write_text(
+        json.dumps(data, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    os.replace(tmp, path)
+
+def load_manifest(project, run_id):
+    path = manifest_path(project, run_id)
+    if not path.exists():
+        raise SystemExit(f"ERROR: manifest not found: {path}")
+
+    data = json.loads(path.read_text(encoding="utf-8"))
+    return path, data
+
+def normalize_node(node, index):
+    node_id = str(node.get("id", "")).strip()
+    if not node_id:
+        raise SystemExit("ERROR: every node needs an id")
+
+    status = str(node.get("status", "planned"))
+    if status not in VALID_STATUSES:
+        raise SystemExit(f"ERROR: invalid status: {status}")
+
+    return {
+        "id": node_id,
+        "label": str(node.get("label", node_id)),
+        "purpose": str(node.get("purpose", "")),
+        "summary": str(node.get("summary", "")),
+        "status": status,
+        "order": int(node.get("order", index * 10)),
+        "trunk": bool(node.get("trunk", True)),
+        "parent": node.get("parent"),
+        "task_ids": list(node.get("task_ids", [])),
+        "dispatch_ids": list(node.get("dispatch_ids", [])),
+        "terminal_ids": list(node.get("terminal_ids", [])),
+    }
+
+def append_unique(target, values):
+    for value in values:
+        if value and value not in target:
+            target.append(value)
+
+def cmd_init(args):
+    if args.plan_file == "-":
+        raw = json.load(sys.stdin)
+    else:
+        raw = json.loads(
+            Path(args.plan_file).read_text(encoding="utf-8")
+        )
+
+    raw_nodes = raw.get("nodes", []) if isinstance(raw, dict) else raw
+
+    if not isinstance(raw_nodes, list) or not raw_nodes:
+        raise SystemExit("ERROR: plan must contain a non-empty node list")
+
+    nodes = [
+        normalize_node(node, i)
+        for i, node in enumerate(raw_nodes)
+    ]
+
+    ids = [node["id"] for node in nodes]
+
+    if len(ids) != len(set(ids)):
+        raise SystemExit("ERROR: duplicate node id")
+
+    valid_ids = set(ids)
+
+    for node in nodes:
+        parent = node.get("parent")
+        if parent is not None and parent not in valid_ids:
+            raise SystemExit(
+                f"ERROR: node {node['id']} references unknown parent {parent}"
+            )
+
+    project = str(Path(args.project).expanduser().resolve())
+
+    data = {
+        "schema_version": 1,
+        "run_id": args.run,
+        "title": args.title,
+        "project": project,
+        "created_at": now(),
+        "updated_at": now(),
+        "nodes": nodes,
+    }
+
+    path = manifest_path(project, args.run)
+
+    if path.exists() and not args.force:
+        raise SystemExit(
+            f"ERROR: manifest already exists: {path}"
+        )
+
+    atomic_write(path, data)
+    print(path)
+
+def cmd_patch(args):
+    path, data = load_manifest(args.project, args.run)
+
+    node = next(
+        (
+            item
+            for item in data.get("nodes", [])
+            if item.get("id") == args.node
+        ),
+        None,
+    )
+
+    if node is None:
+        raise SystemExit(f"ERROR: unknown node: {args.node}")
+
+    if args.status is not None:
+        node["status"] = args.status
+
+    if args.summary is not None:
+        node["summary"] = args.summary
+
+    if args.purpose is not None:
+        node["purpose"] = args.purpose
+
+    append_unique(node.setdefault("task_ids", []), args.task)
+    append_unique(node.setdefault("dispatch_ids", []), args.dispatch)
+    append_unique(node.setdefault("terminal_ids", []), args.terminal)
+
+    data["updated_at"] = now()
+    atomic_write(path, data)
+
+    print(path)
+
+def cmd_show(args):
+    _, data = load_manifest(args.project, args.run)
+    print(json.dumps(data, ensure_ascii=False, indent=2))
+
+parser = argparse.ArgumentParser(
+    description="Orca high-level progress manifest helper"
+)
+
+sub = parser.add_subparsers(dest="command", required=True)
+
+p = sub.add_parser("init")
+p.add_argument("--run", required=True)
+p.add_argument("--project", required=True)
+p.add_argument("--title", required=True)
+p.add_argument("--plan-file", required=True)
+p.add_argument("--force", action="store_true")
+p.set_defaults(func=cmd_init)
+
+p = sub.add_parser("patch")
+p.add_argument("--run", required=True)
+p.add_argument("--project", required=True)
+p.add_argument("--node", required=True)
+p.add_argument("--status", choices=sorted(VALID_STATUSES))
+p.add_argument("--summary")
+p.add_argument("--purpose")
+p.add_argument("--task", action="append", default=[])
+p.add_argument("--dispatch", action="append", default=[])
+p.add_argument("--terminal", action="append", default=[])
+p.set_defaults(func=cmd_patch)
+
+p = sub.add_parser("show")
+p.add_argument("--run", required=True)
+p.add_argument("--project", required=True)
+p.set_defaults(func=cmd_show)
+
+args = parser.parse_args()
+args.func(args)

@@ -74,14 +74,11 @@ Do not say vague things such as:
 
 For a fresh task, explicitly provide:
 
-### 可执行命令
+### 可执行 Bash 命令
 
-Use the command for the current platform:
+The command must explicitly launch:
 
-```text
-Ubuntu/WSL: ORCA_SUPERVISOR_MODE=1 orca-kimi
-Windows PowerShell: $env:ORCA_SUPERVISOR_MODE='1'; orca-kimi
-```
+`ORCA_SUPERVISOR_MODE=1 orca-kimi`
 
 from the real project directory.
 
@@ -89,7 +86,7 @@ Run `orca-init` first only if initialization is actually needed.
 
 Then provide exactly one consolidated block labelled:
 
-### 发给 KIMI 的文本（不是命令）
+### 发给 KIMI 的文本（不是 Bash）
 
 The KIMI bootstrap instruction must state that KIMI is a SHORT-LIVED
 Runtime Coordinator and must:
@@ -112,7 +109,7 @@ Normal final state:
 
 After the REAL Run ID is known, provide exactly one Supervisor command:
 
-`orca-supervisor --run REAL_RUN_ID --project REAL_PROJECT_PATH --no-initial-kick`
+`orca-supervisor --run REAL_RUN_ID --project /real/project/path --no-initial-kick`
 
 Never put a fake or placeholder Run ID in an executable command.
 
@@ -384,5 +381,80 @@ If a healthy authorized job already exists:
 
 ## 16. Historical rules
 
-GPT-5.6 Luna / `orca-luna` is historical only and is not packaged as active
-policy. It MUST NOT be selected as the default workflow.
+Historical Orca policy is archived under:
+
+`references/legacy/`
+
+Those files are historical evidence only.
+
+They are NOT active policy.
+
+<!-- ORCA_DASHBOARD_SKILL_V1_START -->
+
+## Progress Dashboard integration
+
+The current Orca workflow includes the read-only
+Orca Progress Dashboard v1.
+
+Before coordinating a fresh Run or recovering an existing Run,
+read and follow:
+
+- `references/current_system.md`
+- `references/workflow.md`
+
+The Dashboard rules in `references/current_system.md` are part of
+the current active Orca workflow.
+
+### Fresh Run
+
+After creating the real fresh Run ID, KIMI should create one
+high-level progress manifest using `orca-progress`.
+
+The progress manifest is only a human-facing visualization plan.
+It does NOT pre-create future gated Orca Tasks.
+
+Prefer approximately 5-10 high-level trunk phases.
+
+### Runtime updates
+
+Before every Supervisor-facing KIMI return, update the progress
+manifest when one exists.
+
+Keep the visual state synchronized with durable Orca evidence.
+
+Bind real Task / Dispatch / Terminal identifiers when applicable.
+
+Completed phases should contain a concise evidence-grounded summary.
+
+Future phases should contain a concise purpose.
+
+Allowed visual states are:
+
+- planned
+- ready
+- active
+- completed
+- revision
+- blocked
+- escalated
+- skipped
+
+Never invent numeric percentage completion.
+
+### Separation of responsibilities
+
+The Dashboard is strictly read-only observability.
+
+The lifecycle architecture remains:
+
+Deterministic Python Supervisor
+-> KIMI Runtime Coordinator
+-> Claude Executor
+-> DSH / DeepSeek Reviewer
+-> GPT-5.6 Terra only for genuine strategic escalation
+
+Dashboard failure must never be treated as Run failure.
+
+`orca-luna` remains legacy and is not restored by the Dashboard.
+
+<!-- ORCA_DASHBOARD_SKILL_V1_END -->

@@ -140,6 +140,36 @@ Required behavior:
 8. Once a long-running worker/reviewer is active, RETURN immediately.
 9. Do not wait for that work to finish.
 
+Dashboard / progress-manifest contract:
+
+10. The read-only Dashboard manifest for this Run is:
+    {project}/.orca/progress/{run_id}.json
+
+11. Before making lifecycle decisions, inspect whether that manifest exists.
+    If it is missing, reconstruct a high-level visual plan from:
+    - the authoritative project task/contract documents;
+    - durable Run / Task / Dispatch / worker / Reviewer state;
+    - already completed evidence.
+    Use orca-progress to create the manifest. Do NOT invent completed work,
+    fake percentages, or speculative future Orca Tasks.
+
+12. Keep the Dashboard at human-scale granularity, normally about 5-10 trunk
+    phases. Parallel read-only investigations may be represented as children.
+    The visual plan does NOT authorize future gated Orca Tasks.
+
+13. Whenever a real phase/gate, Task, Dispatch, worker, Reviewer, blocker,
+    revision, escalation, or completion state changes, update the corresponding
+    manifest node using orca-progress. Bind real Task / Dispatch / Terminal IDs
+    when available.
+
+14. Before emitting ANY SUPERVISOR_RETURN_* or SUPERVISOR_ESCALATE_TERRA final
+    line, synchronize the manifest with the durable state observed in this turn.
+
+15. Dashboard state is observability only. Never alter Orca lifecycle state,
+    duplicate work, weaken acceptance criteria, or manufacture a completion
+    merely to make the Dashboard look complete. Dashboard failure alone is not
+    Run failure.
+
 Cross-project resource isolation is mandatory.
 Do not manipulate UNKNOWN_OWNERSHIP or OTHER_RUN_OR_PROJECT processes.
 

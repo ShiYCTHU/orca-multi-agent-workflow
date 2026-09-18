@@ -9,6 +9,9 @@ MODE="${1:-install}"
 
 sources=(
   bin/orca-supervisor
+  bin/orca-progress
+  bin/orca-dashboard
+  bin/orca-supervise-ui
   bin/orca-kimi
   bin/orca-terra
   bin/orca-init

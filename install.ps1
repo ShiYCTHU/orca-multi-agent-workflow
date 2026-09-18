@@ -13,6 +13,12 @@ $pathMarker = Join-Path $stateDir 'windows-path-added'
 $files = @(
     @{ Source = 'bin/orca-supervisor'; Target = (Join-Path $binDir 'orca-supervisor.py') }
     @{ Source = 'windows/orca-supervisor.cmd'; Target = (Join-Path $binDir 'orca-supervisor.cmd') }
+    @{ Source = 'bin/orca-progress'; Target = (Join-Path $binDir 'orca-progress.py') }
+    @{ Source = 'windows/orca-progress.cmd'; Target = (Join-Path $binDir 'orca-progress.cmd') }
+    @{ Source = 'bin/orca-dashboard'; Target = (Join-Path $binDir 'orca-dashboard.py') }
+    @{ Source = 'windows/orca-dashboard.cmd'; Target = (Join-Path $binDir 'orca-dashboard.cmd') }
+    @{ Source = 'windows/orca-supervise-ui.ps1'; Target = (Join-Path $binDir 'orca-supervise-ui.ps1') }
+    @{ Source = 'windows/orca-supervise-ui.cmd'; Target = (Join-Path $binDir 'orca-supervise-ui.cmd') }
     @{ Source = 'windows/orca-kimi.cmd'; Target = (Join-Path $binDir 'orca-kimi.cmd') }
     @{ Source = 'windows/orca-terra.cmd'; Target = (Join-Path $binDir 'orca-terra.cmd') }
     @{ Source = 'windows/orca-init.cmd'; Target = (Join-Path $binDir 'orca-init.cmd') }

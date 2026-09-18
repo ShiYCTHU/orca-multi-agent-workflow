@@ -1,0 +1,653 @@
+#!/usr/bin/env python3
+
+import argparse
+import json
+import threading
+import webbrowser
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+
+
+HTML = r'''<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Orca Progress Dashboard</title>
+
+<style>
+:root {
+  color-scheme: light dark;
+  --bg: #111418;
+  --panel: #191d23;
+  --text: #eef2f6;
+  --muted: #9aa7b4;
+  --border: #38424e;
+  --active: #5ca0ff;
+  --ok: #5ac48a;
+  --warn: #e6b85c;
+  --bad: #e66f6f;
+}
+
+@media (prefers-color-scheme: light) {
+  :root {
+    --bg: #f5f7fa;
+    --panel: #ffffff;
+    --text: #17202a;
+    --muted: #65727e;
+    --border: #d7dde3;
+    --active: #286fc5;
+    --ok: #238654;
+    --warn: #956300;
+    --bad: #b23a3a;
+  }
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font-family: system-ui, sans-serif;
+}
+
+main {
+  max-width: 1050px;
+  margin: auto;
+  padding: 24px;
+}
+
+h1 {
+  margin: 0 0 8px;
+}
+
+.meta {
+  color: var(--muted);
+  margin-bottom: 24px;
+  line-height: 1.7;
+}
+
+.layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 340px;
+  gap: 22px;
+}
+
+.tree {
+  position: relative;
+  padding-left: 28px;
+}
+
+.tree::before {
+  content: "";
+  position: absolute;
+  left: 10px;
+  top: 24px;
+  bottom: 24px;
+  width: 2px;
+  background: var(--border);
+}
+
+.phase {
+  position: relative;
+  margin-bottom: 14px;
+}
+
+.phase::before {
+  content: "";
+  position: absolute;
+  left: -22px;
+  top: 26px;
+  width: 14px;
+  height: 2px;
+  background: var(--border);
+}
+
+.node {
+  width: 100%;
+  border: 1px solid var(--border);
+  border-left-width: 5px;
+  border-radius: 10px;
+  background: var(--panel);
+  color: var(--text);
+  padding: 13px 14px;
+  cursor: pointer;
+  text-align: left;
+}
+
+.node:hover,
+.node:focus {
+  border-color: var(--active);
+  outline: none;
+}
+
+.node.completed {
+  border-left-color: var(--ok);
+}
+
+.node.active,
+.node.ready {
+  border-left-color: var(--active);
+}
+
+.node.revision {
+  border-left-color: var(--warn);
+}
+
+.node.blocked,
+.node.escalated {
+  border-left-color: var(--bad);
+}
+
+.node.planned {
+  opacity: 0.72;
+}
+
+.label {
+  font-weight: 650;
+}
+
+.status {
+  margin-top: 4px;
+  font-size: 12px;
+  color: var(--muted);
+  text-transform: uppercase;
+}
+
+.detail {
+  position: sticky;
+  top: 18px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 16px;
+}
+
+.detail h2 {
+  margin-top: 0;
+}
+
+.detail-text {
+  line-height: 1.6;
+  white-space: pre-wrap;
+}
+
+.ids {
+  margin-top: 15px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border);
+  color: var(--muted);
+  font-family: monospace;
+  font-size: 12px;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+.children {
+  margin: 8px 0 0 30px;
+  padding-left: 12px;
+  border-left: 1px dashed var(--border);
+}
+
+.child {
+  margin-top: 7px;
+}
+
+.child .node {
+  padding: 9px 11px;
+  font-size: 13px;
+}
+
+@media (max-width: 760px) {
+  .layout {
+    grid-template-columns: 1fr;
+  }
+
+  .detail {
+    position: static;
+  }
+}
+</style>
+</head>
+
+<body>
+<main>
+
+<h1 id="title">Orca Progress Dashboard</h1>
+
+<div class="meta">
+  <div id="run">Run: —</div>
+  <div id="summary">等待进度数据...</div>
+  <div id="updated">Updated: —</div>
+</div>
+
+<div class="layout">
+
+<section id="tree">
+  等待 manifest...
+</section>
+
+<aside class="detail">
+  <h2 id="detail-title">选择一个节点</h2>
+  <div id="detail-status" class="status">—</div>
+  <p id="detail-text" class="detail-text">
+    鼠标悬停可看简要提示；点击节点可固定详情。
+  </p>
+  <div id="detail-ids" class="ids"></div>
+</aside>
+
+</div>
+
+</main>
+
+<script>
+(() => {
+
+  let selected = null;
+
+  const symbols = {
+    planned: "○",
+    ready: "◐",
+    active: "●",
+    completed: "✓",
+    revision: "↺",
+    blocked: "!",
+    escalated: "↑",
+    skipped: "–"
+  };
+
+  function description(node) {
+    if (
+      ["completed", "revision", "blocked", "escalated", "skipped"]
+        .includes(node.status)
+      && node.summary
+    ) {
+      return node.summary;
+    }
+
+    return node.purpose || node.summary || "暂无摘要。";
+  }
+
+  function selectNode(node) {
+    selected = node.id;
+
+    document.getElementById("detail-title").textContent =
+      `${symbols[node.status] || "○"} ${node.label}`;
+
+    document.getElementById("detail-status").textContent =
+      node.status || "planned";
+
+    document.getElementById("detail-text").textContent =
+      description(node);
+
+    const lines = [];
+
+    if (node.task_ids?.length)
+      lines.push("Task: " + node.task_ids.join(", "));
+
+    if (node.dispatch_ids?.length)
+      lines.push("Dispatch: " + node.dispatch_ids.join(", "));
+
+    if (node.terminal_ids?.length)
+      lines.push("Terminal: " + node.terminal_ids.join(", "));
+
+    document.getElementById("detail-ids").textContent =
+      lines.join("\n");
+  }
+
+  function createNode(node) {
+    const button = document.createElement("button");
+
+    button.type = "button";
+    button.className = `node ${node.status || "planned"}`;
+    button.title = description(node);
+
+    const label = document.createElement("div");
+    label.className = "label";
+    label.textContent =
+      `${symbols[node.status] || "○"} ${node.label}`;
+
+    const status = document.createElement("div");
+    status.className = "status";
+    status.textContent = node.status || "planned";
+
+    button.appendChild(label);
+    button.appendChild(status);
+
+    button.addEventListener(
+      "click",
+      () => selectNode(node)
+    );
+
+    return button;
+  }
+
+  function render(data) {
+    const nodes = Array.isArray(data.nodes)
+      ? data.nodes
+      : [];
+
+    document.getElementById("title").textContent =
+      data.title || "Orca Progress Dashboard";
+
+    document.getElementById("run").textContent =
+      "Run: " + (data.run_id || "—");
+
+    document.getElementById("updated").textContent =
+      "Updated: " + (data.updated_at || "—");
+
+    const counts = {};
+
+    for (const node of nodes) {
+      counts[node.status] =
+        (counts[node.status] || 0) + 1;
+    }
+
+    document.getElementById("summary").textContent =
+      `${counts.completed || 0} completed · ` +
+      `${counts.active || 0} active · ` +
+      `${counts.revision || 0} revision · ` +
+      `${counts.planned || 0} planned`;
+
+    const tree = document.getElementById("tree");
+    tree.innerHTML = "";
+
+    const trunkNodes = nodes
+      .filter(node => node.trunk !== false)
+      .sort((a, b) => (a.order || 0) - (b.order || 0));
+
+    const childMap = new Map();
+
+    for (const node of nodes.filter(n => n.trunk === false)) {
+      const parent = node.parent || "__orphan__";
+
+      if (!childMap.has(parent))
+        childMap.set(parent, []);
+
+      childMap.get(parent).push(node);
+    }
+
+    const trunk = document.createElement("div");
+    trunk.className = "tree";
+
+    for (const node of trunkNodes) {
+      const phase = document.createElement("div");
+      phase.className = "phase";
+
+      phase.appendChild(createNode(node));
+
+      const children =
+        (childMap.get(node.id) || [])
+        .sort((a, b) => (a.order || 0) - (b.order || 0));
+
+      if (children.length) {
+        const group = document.createElement("div");
+        group.className = "children";
+
+        for (const childNode of children) {
+          const child = document.createElement("div");
+          child.className = "child";
+
+          child.appendChild(
+            createNode(childNode)
+          );
+
+          group.appendChild(child);
+        }
+
+        phase.appendChild(group);
+      }
+
+      trunk.appendChild(phase);
+    }
+
+    tree.appendChild(trunk);
+
+    const current =
+      nodes.find(n => n.id === selected)
+      || nodes.find(n => n.status === "active")
+      || nodes.find(n => n.status === "revision")
+      || trunkNodes[0];
+
+    if (current)
+      selectNode(current);
+  }
+
+  async function refresh() {
+    try {
+      const response = await fetch(
+        "/api/state?t=" + Date.now(),
+        { cache: "no-store" }
+      );
+
+      if (!response.ok)
+        throw new Error("HTTP " + response.status);
+
+      const data = await response.json();
+
+      if (!data.exists) {
+        document.getElementById("summary").textContent =
+          "等待 progress manifest...";
+        return;
+      }
+
+      render(data);
+
+    } catch (error) {
+      document.getElementById("summary").textContent =
+        "读取 Dashboard 数据失败";
+    }
+  }
+
+  refresh();
+  setInterval(refresh, 2000);
+
+})();
+</script>
+
+</body>
+</html>
+'''
+
+
+def manifest_path(project, run_id):
+    return (
+        Path(project).expanduser().resolve()
+        / ".orca"
+        / "progress"
+        / f"{run_id}.json"
+    )
+
+
+def read_state(path, run_id, project):
+    if not path.exists():
+        return {
+            "exists": False,
+            "run_id": run_id,
+            "project": str(
+                Path(project).expanduser().resolve()
+            ),
+            "nodes": [],
+        }
+
+    data = json.loads(
+        path.read_text(encoding="utf-8")
+    )
+
+    data["exists"] = True
+    return data
+
+
+def make_handler(path, run_id, project):
+
+    class Handler(BaseHTTPRequestHandler):
+
+        def log_message(self, fmt, *args):
+            return
+
+        def send_data(self, payload, content_type):
+            self.send_response(200)
+            self.send_header("Content-Type", content_type)
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+
+        def do_GET(self):
+            route = self.path.split("?", 1)[0]
+
+            if route == "/":
+                self.send_data(
+                    HTML.encode("utf-8"),
+                    "text/html; charset=utf-8",
+                )
+                return
+
+            if route == "/api/state":
+                data = read_state(
+                    path,
+                    run_id,
+                    project,
+                )
+
+                payload = json.dumps(
+                    data,
+                    ensure_ascii=False,
+                ).encode("utf-8")
+
+                self.send_data(
+                    payload,
+                    "application/json; charset=utf-8",
+                )
+                return
+
+            if route == "/healthz":
+                self.send_data(
+                    b"ok\n",
+                    "text/plain; charset=utf-8",
+                )
+                return
+
+            self.send_error(404)
+
+    return Handler
+
+
+parser = argparse.ArgumentParser(
+    description="Read-only Orca progress dashboard"
+)
+
+parser.add_argument("--run", required=True)
+parser.add_argument("--project", required=True)
+parser.add_argument("--port", type=int, default=8765)
+parser.add_argument("--no-browser", action="store_true")
+parser.add_argument("--self-test", action="store_true")
+
+args = parser.parse_args()
+
+path = manifest_path(
+    args.project,
+    args.run,
+)
+
+if args.self_test:
+    state = read_state(
+        path,
+        args.run,
+        args.project,
+    )
+
+    if not state.get("exists"):
+        raise SystemExit(
+            f"SELF_TEST FAIL: manifest missing: {path}"
+        )
+
+    if state.get("schema_version") != 1:
+        raise SystemExit(
+            "SELF_TEST FAIL: unsupported schema version"
+        )
+
+    if not isinstance(state.get("nodes"), list):
+        raise SystemExit(
+            "SELF_TEST FAIL: nodes is not a list"
+        )
+
+    print("ORCA DASHBOARD SELF_TEST: PASS")
+    raise SystemExit(0)
+
+
+handler = make_handler(
+    path,
+    args.run,
+    args.project,
+)
+
+server = None
+actual_port = None
+
+for port in range(
+    args.port,
+    args.port + 20,
+):
+    try:
+        server = ThreadingHTTPServer(
+            ("127.0.0.1", port),
+            handler,
+        )
+
+        actual_port = port
+        break
+
+    except OSError:
+        continue
+
+
+if server is None:
+    raise SystemExit(
+        "ERROR: no free local port found"
+    )
+
+
+url = f"http://127.0.0.1:{actual_port}/"
+
+print()
+print("===== ORCA PROGRESS DASHBOARD =====")
+print(f"Run      : {args.run}")
+print(f"Project  : {Path(args.project).expanduser().resolve()}")
+print(f"Manifest : {path}")
+print(f"URL      : {url}")
+print()
+print("Ctrl-C only stops Dashboard.")
+print()
+
+
+if not args.no_browser:
+
+    def open_browser():
+        try:
+            webbrowser.open(url)
+        except Exception:
+            pass
+
+    timer = threading.Timer(
+        0.5,
+        open_browser,
+    )
+
+    timer.daemon = True
+    timer.start()
+
+
+try:
+    server.serve_forever(
+        poll_interval=0.5
+    )
+
+except KeyboardInterrupt:
+    pass
+
+finally:
+    server.server_close()

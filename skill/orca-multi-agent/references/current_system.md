@@ -36,13 +36,7 @@ current task plan and project instructions.
 
 ## KIMI Coordinator
 
-Ubuntu/WSL:
-
     ORCA_SUPERVISOR_MODE=1 orca-kimi
-
-Windows PowerShell:
-
-    $env:ORCA_SUPERVISOR_MODE='1'; orca-kimi
 
 KIMI is short-lived.
 
@@ -85,23 +79,16 @@ Do not make the user manually coordinate phases.
 
 The assistant should normally output:
 
-## 可执行命令
-
-Ubuntu/WSL:
+## 可执行 Bash 命令
 
     cd /real/project/path
     ORCA_SUPERVISOR_MODE=1 orca-kimi
-
-Windows PowerShell:
-
-    Set-Location C:\real\project\path
-    $env:ORCA_SUPERVISOR_MODE='1'; orca-kimi
 
 Run `orca-init` first only if the project is not already initialized.
 
 Then:
 
-## 发给 KIMI 的文本（不是命令）
+## 发给 KIMI 的文本（不是 Bash）
 
 Provide ONE consolidated KIMI bootstrap task.
 
@@ -132,20 +119,19 @@ After the REAL Run ID is returned, provide:
 
     orca-supervisor \
       --run REAL_RUN_ID \
-      --project REAL_PROJECT_PATH \
+      --project /real/project/path \
       --no-initial-kick
 
 Never put a fake Run ID into an executable command.
 
 # Interrupted-task user experience
 
-For interrupted work, use the platform-appropriate launch command above, then
-provide `SAME_RUN_RECOVERY`. On Ubuntu/WSL that launch is:
+For interrupted work:
 
     cd /real/project/path
     ORCA_SUPERVISOR_MODE=1 orca-kimi
 
-The consolidated instruction must contain:
+Then provide ONE consolidated instruction containing:
 
     SAME_RUN_RECOVERY
 
@@ -214,5 +200,185 @@ Unknown and other-project resources are read-only.
 
 # Historical policy
 
-GPT-5.6 Luna / `orca-luna` is historical only, is not packaged here, and is
-not active policy.
+Archived material under:
+
+    references/legacy/
+
+is historical evidence only.
+
+It is not active policy.
+
+<!-- ORCA_PROGRESS_DASHBOARD_V1_START -->
+
+## Orca Progress Dashboard v1
+
+The Orca workflow includes a read-only progress visualization layer.
+
+Architecture:
+
+KIMI Runtime Coordinator
+-> <project>/.orca/progress/<run_id>.json
+-> orca-dashboard
+-> local browser on 127.0.0.1
+
+The Dashboard is observability only.
+
+It MUST NOT control or modify:
+
+- Orca Run lifecycle
+- Task lifecycle
+- Dispatch lifecycle
+- Executor processes
+- Reviewer processes
+- CFD processes
+- Supervisor decisions
+
+Dashboard failure is NOT Orca Run failure.
+
+### Fresh Run progress plan
+
+When KIMI creates exactly one fresh Orca Run, it should also create
+one high-level progress manifest for that Run.
+
+The progress manifest is a VISUAL PLAN only.
+
+Creating planned visualization nodes does NOT mean creating future
+gated Orca Tasks.
+
+Prefer approximately 5-10 human-readable trunk nodes, for example:
+
+- Intake / Rules
+- Investigation
+- Design Gate
+- Implementation
+- Validation
+- Independent Review
+- Delivery
+
+Parallel read-only investigations may appear as optional child nodes.
+
+Do not represent every shell command or tiny internal action.
+
+### Create manifest
+
+After the real Run ID exists, KIMI should create the manifest with:
+
+orca-progress init \
+  --run REAL_RUN_ID \
+  --project /absolute/project/path \
+  --title "Short human-readable task title" \
+  --plan-file -
+
+The node plan is provided as JSON on stdin.
+
+### Update manifest
+
+Whenever KIMI creates, dispatches, adjudicates, revises, blocks,
+or completes real Orca work, it should update the corresponding
+high-level visual node.
+
+Example:
+
+orca-progress patch \
+  --run REAL_RUN_ID \
+  --project /absolute/project/path \
+  --node implementation \
+  --status active \
+  --task task_xxx \
+  --dispatch ctx_xxx
+
+When a node completes, KIMI should also provide a concise,
+evidence-grounded 1-3 sentence summary.
+
+Before every Supervisor-facing KIMI return, update the progress
+manifest when the Run has one.
+
+### Allowed visualization states
+
+Use only:
+
+- planned
+- ready
+- active
+- completed
+- revision
+- blocked
+- escalated
+- skipped
+
+Do not invent numerical percentage-complete values for active
+Claude workers, Reviewers, validation jobs, or CFD.
+
+### Run / Task / Dispatch mapping
+
+Whenever possible, bind real lifecycle identifiers to the visual node:
+
+- task_ids
+- dispatch_ids
+- terminal_ids
+
+One visual node may correspond to multiple real Tasks or Dispatches.
+
+The visual node is NOT itself an Orca Task.
+
+### Human-readable text
+
+For unfinished nodes, purpose explains the task goal.
+
+For completed nodes, summary explains what was actually accomplished.
+
+Never mark a node completed merely because a process disappeared.
+
+Use durable Orca evidence and normal lifecycle adjudication.
+
+### Dashboard launch
+
+The read-only Dashboard command is:
+
+orca-dashboard \
+  --run REAL_RUN_ID \
+  --project /absolute/project/path
+
+The browser automatically refreshes the progress manifest.
+
+The Dashboard may be stopped and restarted at any time without
+changing the Orca Run.
+
+<!-- ORCA_PROGRESS_DASHBOARD_V1_END -->
+
+<!-- ORCA_SUPERVISE_UI_V1_START -->
+
+## Preferred Supervisor + Dashboard launch
+
+After KIMI has created the real authoritative Run ID and returned control
+to the user, the preferred launch command is:
+
+orca-supervise-ui --run REAL_RUN_ID --project /absolute/project/path
+
+This command starts:
+
+1. the read-only Orca Progress Dashboard;
+2. the deterministic orca-supervisor with --no-initial-kick.
+
+The Dashboard remains optional observability only.
+
+If the Dashboard fails to start, that failure must not be treated as an
+Orca Run failure.
+
+The underlying authoritative lifecycle remains:
+
+deterministic Python Supervisor
+-> short-lived KIMI Runtime Coordinator
+-> Claude Executor
+-> DSH / DeepSeek Reviewer
+-> GPT-5.6 Terra only for genuine strategic escalation
+
+The user may still launch the components separately when needed:
+
+orca-dashboard --run REAL_RUN_ID --project /absolute/project/path
+
+orca-supervisor --run REAL_RUN_ID --project /absolute/project/path --no-initial-kick
+
+Do not use placeholder Run IDs in executable commands.
+
+<!-- ORCA_SUPERVISE_UI_V1_END -->

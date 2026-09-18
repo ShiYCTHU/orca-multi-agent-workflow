@@ -15,6 +15,9 @@ GPT-5.6 Luna / `orca-luna` is legacy and is not installed by this repository.
 ## What is included
 
 - `bin/orca-supervisor`: deterministic long-wait and event supervisor.
+- `bin/orca-progress`: atomic progress-manifest creator and updater.
+- `bin/orca-dashboard`: read-only local Dashboard server.
+- `bin/orca-supervise-ui`: starts the Dashboard independently, then runs the Supervisor.
 - `bin/orca-kimi`: short-lived KIMI coordinator launcher.
 - `bin/orca-terra`: GPT-5.6 Terra arbitrator launcher.
 - `bin/orca-init`: adds the current project-local workflow documents without overwriting existing files.
@@ -67,7 +70,7 @@ If your tools run inside WSL rather than native Windows, use the Ubuntu instruct
 ## Install on Ubuntu or WSL
 
 ```bash
-git clone YOUR_GITHUB_REPOSITORY_URL
+git clone https://github.com/ShiYCTHU/orca-multi-agent-workflow.git
 cd orca-multi-agent-workflow
 ./install.sh
 ```
@@ -104,13 +107,21 @@ Ensure `~/.local/bin` is in `PATH`, then restart Codex Desktop so it discovers t
    orca-kimi
    ```
 
-6. After KIMI returns the real Run ID, start the long-lived supervisor:
+6. After KIMI returns the real Run ID, start the Supervisor and read-only Dashboard. On Ubuntu/WSL:
 
-   ```text
-   orca-supervisor --run REAL_RUN_ID --project /path/to/project --no-initial-kick
+   ```bash
+   orca-supervise-ui --run REAL_RUN_ID --project /path/to/project
    ```
 
-   Use the native Windows project path when running on Windows.
+   On native Windows PowerShell:
+
+   ```powershell
+   orca-supervise-ui -Run REAL_RUN_ID -Project C:\path\to\project
+   ```
+
+   The Dashboard remains available if the Supervisor exits. It is observability
+   only and never controls the Run. To run without it, use
+   `orca-supervisor --run REAL_RUN_ID --project /path/to/project --no-initial-kick`.
 
 ## Smoke tests
 
@@ -122,7 +133,7 @@ From the cloned repository:
 orca-supervisor --self-test
 ```
 
-- `smoke-test.sh` checks packaged syntax, executable bits, portability, and common secret patterns.
+- `smoke-test.sh` checks packaged syntax, progress-manifest behavior, Dashboard validation, executable bits, portability, and common secret patterns.
 - `install.sh --check` checks required commands and DSH configuration without changing files.
 - `orca-supervisor --self-test` verifies the installed runtime commands and reports the active model roles.
 
