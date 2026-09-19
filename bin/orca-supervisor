@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 import argparse
+import fcntl
 import hashlib
 import os
 from pathlib import Path
@@ -10,16 +11,15 @@ import subprocess
 import sys
 import time
 from datetime import datetime
-
-if os.name == "nt":
-    import msvcrt
-else:
-    import fcntl
+import json
 
 VERSION = "1.1"
 
 DEFAULT_COORDINATOR = "kimi"
 DEFAULT_ARBITRATOR = "terra"
+
+ROLE_FREEZE_CUTOFF_UTC = "2026-09-18T14:47:29Z"
+# Runs created before this deployment require an explicit role snapshot.
 
 DEFAULT_WAIT_SEC = 60
 DEFAULT_AUDIT_MIN = 60
@@ -51,13 +51,6 @@ def request_stop(signum, frame):
     say("Stop requested; workers/reviewers will NOT be touched.")
 
 
-def require_binary(name):
-    path = shutil.which(name)
-    if not path:
-        raise SystemExit(f"ERROR: required command not found: {name}")
-    return path
-
-
 def orca_cli_name():
     return os.environ.get(
         "ORCA_CLI_COMMAND",
@@ -65,38 +58,443 @@ def orca_cli_name():
     )
 
 
-def acquire_lock(path, run_id):
-    lock_file = path.open("a+b")
+def require_binary(name):
+    path = shutil.which(name)
+    if not path:
+        raise SystemExit(f"ERROR: required command not found: {name}")
+    return path
+
+
+def _orca_result(cmd, action):
+    proc = subprocess.run(
+        cmd,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        timeout=30,
+    )
+
+    if proc.returncode != 0:
+        detail = (proc.stderr or proc.stdout or "").strip()
+        raise RuntimeError(f"{action} failed: {detail or 'unknown error'}")
 
     try:
-        if os.name == "nt":
-            lock_file.seek(0, os.SEEK_END)
-            if lock_file.tell() == 0:
-                lock_file.write(b"\0")
-                lock_file.flush()
-            lock_file.seek(0)
-            msvcrt.locking(lock_file.fileno(), msvcrt.LK_NBLCK, 1)
-            lock_file.seek(1)
-        else:
-            fcntl.flock(
-                lock_file.fileno(),
-                fcntl.LOCK_EX | fcntl.LOCK_NB,
-            )
-            lock_file.seek(0)
+        envelope = json.loads(proc.stdout)
+    except (ValueError, TypeError) as exc:
+        raise RuntimeError(f"{action} returned invalid JSON: {exc}")
 
-        lock_file.truncate()
-        lock_file.write(str(os.getpid()).encode())
-        lock_file.flush()
-        return lock_file
-    except (BlockingIOError, OSError):
-        lock_file.close()
-        raise SystemExit(
-            f"ERROR: Supervisor already active for {run_id}"
+    if not isinstance(envelope, dict) or envelope.get("ok") is not True:
+        error = envelope.get("error") if isinstance(envelope, dict) else None
+        raise RuntimeError(f"{action} failed: {error or 'invalid response'}")
+
+    result = envelope.get("result")
+    if not isinstance(result, dict):
+        raise RuntimeError(f"{action} returned no result object")
+
+    return result
+
+
+def _current_run_id():
+    result = _orca_result(
+        [
+            orca_cli_name(),
+            "orchestration",
+            "run-current",
+            "--json",
+        ],
+        "checking this coordinator terminal's Run binding",
+    )
+    run = result.get("run")
+
+    if run is None:
+        return None
+
+    if not isinstance(run, dict) or not isinstance(run.get("id"), str):
+        raise RuntimeError("current Run binding has an invalid identity")
+
+    return run["id"]
+
+
+def ensure_run_binding(run_id):
+    current = _current_run_id()
+
+    if current == run_id:
+        say(f"Run binding  : already bound to {run_id}")
+        return
+
+    if current is not None:
+        raise RuntimeError(
+            "refusing to replace this coordinator terminal's Run binding: "
+            f"currently {current}, requested {run_id}"
         )
+
+    target = _orca_result(
+        [
+            orca_cli_name(),
+            "orchestration",
+            "run-show",
+            "--id",
+            run_id,
+            "--json",
+        ],
+        f"inspecting target Run {run_id}",
+    ).get("run")
+
+    if not isinstance(target, dict) or target.get("id") != run_id:
+        raise RuntimeError(f"target Run {run_id} could not be verified")
+
+    if target.get("legacy"):
+        raise RuntimeError(
+            f"target Run {run_id} requires explicit legacy takeover; "
+            "refusing automatic --takeover-legacy"
+        )
+
+    _orca_result(
+        [
+            orca_cli_name(),
+            "orchestration",
+            "run-use",
+            "--id",
+            run_id,
+            "--json",
+        ],
+        f"binding this coordinator terminal to Run {run_id}",
+    )
+
+    confirmed = _current_run_id()
+    if confirmed != run_id:
+        raise RuntimeError(
+            f"Run binding verification failed: expected {run_id}, "
+            f"found {confirmed or 'no binding'}"
+        )
+
+    say(f"Run binding  : bound to {run_id}")
+
+
+def _validate_role_pair(executor, reviewer):
+    allowed = {
+        ("claude", "dsh"),
+        ("dsh", "claude"),
+    }
+
+    if (executor, reviewer) not in allowed:
+        raise ValueError(
+            "unsupported role configuration: "
+            f"executor={executor!r}, reviewer={reviewer!r}"
+        )
+
+
+def _project_role_config(project):
+    path = os.path.join(project, ".orca", "role_config.json")
+
+    if not os.path.exists(path):
+        return {
+            "schema_version": 1,
+            "executor": "claude",
+            "reviewer": "dsh",
+            "source": "default",
+            "project_source": "default",
+        }
+
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+
+        executor = data.get("executor")
+        reviewer = data.get("reviewer")
+
+        _validate_role_pair(executor, reviewer)
+
+        return {
+            "schema_version": 1,
+            "executor": executor,
+            "reviewer": reviewer,
+            "source": path,
+            "project_source": path,
+        }
+
+    except Exception as exc:
+        return {
+            "schema_version": 1,
+            "executor": None,
+            "reviewer": None,
+            "source": path,
+            "project_source": path,
+            "error": str(exc),
+        }
+
+
+def _get_run_created_at(run_id):
+    cmd = [
+        orca_cli_name(),
+        "orchestration",
+        "run-show",
+        "--id",
+        run_id,
+        "--json",
+    ]
+
+    try:
+        proc = subprocess.run(
+            cmd,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=30,
+        )
+    except Exception as exc:
+        raise ValueError(
+            f"cannot inspect durable Run metadata for {run_id}: {exc}"
+        )
+
+    if proc.returncode != 0:
+        detail = (proc.stderr or proc.stdout or "").strip()
+        raise ValueError(
+            f"cannot inspect durable Run metadata for {run_id}: {detail}"
+        )
+
+    try:
+        payload = json.loads(proc.stdout)
+        created_at = payload["result"]["run"]["created_at"]
+    except Exception as exc:
+        raise ValueError(
+            f"Run {run_id} has no readable created_at metadata: {exc}"
+        )
+
+    if not isinstance(created_at, str) or not created_at:
+        raise ValueError(
+            f"Run {run_id} has invalid created_at metadata"
+        )
+
+    return created_at
+
+
+def _is_legacy_unfrozen_run(run_id):
+    created_at = _get_run_created_at(run_id)
+
+    # Orca emits UTC ISO-8601 timestamps. Convert both values to a
+    # fixed-width sortable representation before comparison.
+    def normalize(value):
+        value = value.strip()
+        if value.endswith("Z"):
+            value = value[:-1] + "+00:00"
+
+        from datetime import datetime, timezone
+
+        dt = datetime.fromisoformat(value)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+
+        return dt.astimezone(timezone.utc)
+
+    created = normalize(created_at)
+    cutoff = normalize(ROLE_FREEZE_CUTOFF_UTC)
+
+    return created < cutoff, created_at
+
+
+def _run_role_snapshot_path(project, run_id):
+    run_key = "".join(
+        ch if ch.isalnum() or ch in "._-" else "_"
+        for ch in str(run_id)
+    )
+
+    return os.path.join(
+        project,
+        ".orca",
+        "roles",
+        f"{run_key}.json",
+    )
+
+
+def resolve_role_config(project, run_id):
+    snapshot_path = _run_role_snapshot_path(project, run_id)
+
+    if os.path.exists(snapshot_path):
+        try:
+            with open(snapshot_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+
+            executor = data.get("executor")
+            reviewer = data.get("reviewer")
+
+            _validate_role_pair(executor, reviewer)
+
+            stored_run_id = data.get("run_id")
+            if stored_run_id not in (None, run_id):
+                raise ValueError(
+                    "run role snapshot identity mismatch: "
+                    f"expected {run_id!r}, found {stored_run_id!r}"
+                )
+
+            return {
+                "schema_version": 1,
+                "run_id": run_id,
+                "executor": executor,
+                "reviewer": reviewer,
+                "source": snapshot_path,
+                "project_source": data.get(
+                    "project_source",
+                    data.get("inherited_from", "unknown"),
+                ),
+                "frozen": True,
+            }
+
+        except Exception as exc:
+            return {
+                "schema_version": 1,
+                "run_id": run_id,
+                "executor": None,
+                "reviewer": None,
+                "source": snapshot_path,
+                "project_source": None,
+                "frozen": True,
+                "error": str(exc),
+            }
+
+    # A missing snapshot is safe to auto-freeze only for Runs created
+    # after Run-level role freezing was deployed. Older Runs may have
+    # used a provider pair that differs from the project's current
+    # default, so silently inferring their historical roles is unsafe.
+    try:
+        legacy, created_at = _is_legacy_unfrozen_run(run_id)
+    except Exception as exc:
+        return {
+            "schema_version": 1,
+            "run_id": run_id,
+            "executor": None,
+            "reviewer": None,
+            "source": snapshot_path,
+            "project_source": None,
+            "frozen": False,
+            "error": (
+                "Run has no frozen provider snapshot and its creation "
+                f"time cannot be safely verified: {exc}. "
+                "Do not infer historical roles. Create an explicit "
+                "backfilled snapshot from durable evidence."
+            ),
+        }
+
+    if legacy:
+        return {
+            "schema_version": 1,
+            "run_id": run_id,
+            "executor": None,
+            "reviewer": None,
+            "source": snapshot_path,
+            "project_source": None,
+            "frozen": False,
+            "error": (
+                f"legacy Run {run_id} was created at {created_at}, before "
+                f"Run-role freezing was deployed at {ROLE_FREEZE_CUTOFF_UTC}. "
+                "No frozen provider snapshot exists. Refusing to infer "
+                "historical Executor/Reviewer roles from the current project "
+                "default. Backfill .orca/roles/<run_id>.json from durable "
+                "evidence before resuming this Run."
+            ),
+        }
+
+    project_role = _project_role_config(project)
+
+    if project_role.get("error"):
+        return {
+            "schema_version": 1,
+            "run_id": run_id,
+            "executor": None,
+            "reviewer": None,
+            "source": snapshot_path,
+            "project_source": project_role.get("project_source"),
+            "frozen": False,
+            "error": (
+                "cannot freeze Run role configuration because project "
+                "role configuration is invalid: "
+                f"{project_role.get('error', 'unknown error')}"
+            ),
+        }
+
+    snapshot = {
+        "schema_version": 1,
+        "run_id": run_id,
+        "executor": project_role["executor"],
+        "reviewer": project_role["reviewer"],
+        "project_source": project_role["project_source"],
+    }
+
+    snapshot_dir = os.path.dirname(snapshot_path)
+    os.makedirs(snapshot_dir, exist_ok=True)
+
+    tmp_path = (
+        snapshot_path
+        + f".tmp.{os.getpid()}"
+    )
+
+    try:
+        with open(tmp_path, "x", encoding="utf-8") as f:
+            json.dump(snapshot, f, indent=2)
+            f.write("\n")
+            f.flush()
+            os.fsync(f.fileno())
+
+        os.replace(tmp_path, snapshot_path)
+
+    except FileExistsError:
+        pass
+
+    finally:
+        if os.path.exists(tmp_path):
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+
+    try:
+        with open(snapshot_path, "r", encoding="utf-8") as f:
+            frozen = json.load(f)
+
+        executor = frozen.get("executor")
+        reviewer = frozen.get("reviewer")
+
+        _validate_role_pair(executor, reviewer)
+
+        if frozen.get("run_id") not in (None, run_id):
+            raise ValueError(
+                "newly frozen Run role snapshot identity mismatch"
+            )
+
+        return {
+            "schema_version": 1,
+            "run_id": run_id,
+            "executor": executor,
+            "reviewer": reviewer,
+            "source": snapshot_path,
+            "project_source": frozen.get(
+                "project_source",
+                project_role["project_source"],
+            ),
+            "frozen": True,
+        }
+
+    except Exception as exc:
+        return {
+            "schema_version": 1,
+            "run_id": run_id,
+            "executor": None,
+            "reviewer": None,
+            "source": snapshot_path,
+            "project_source": project_role.get("project_source"),
+            "frozen": True,
+            "error": str(exc),
+        }
 
 
 def coordinator_prompt(run_id, project, reason, event_text):
     excerpt = event_text[-4000:] if event_text else "(none)"
+    role = resolve_role_config(project, run_id)
+
+    executor_provider = role["executor"] or "INVALID"
+    reviewer_provider = role["reviewer"] or "INVALID"
+    role_source = role["source"]
+    role_error = role.get("error") or "(none)"
 
     return f"""
 You are the SHORT-LIVED KIMI Runtime Coordinator managed by
@@ -109,6 +507,25 @@ Project:
 
 Existing authoritative Orca Run:
 {run_id}
+
+Resolved provider routing:
+
+Executor provider:
+{executor_provider}
+
+Reviewer provider:
+{reviewer_provider}
+
+Role configuration source:
+{role_source}
+
+Role configuration error:
+{role_error}
+
+If Role configuration error is not "(none)", do NOT create a new Executor
+or Reviewer Dispatch. Preserve existing active work and return
+SUPERVISOR_RETURN_BLOCKED unless the configuration can be repaired
+procedurally without changing task scope.
 
 Wake reason:
 {reason}
@@ -124,8 +541,8 @@ DO NOT create a new Run.
 
 Perform exactly ONE bounded coordination turn.
 
-Use the `ORCA_CLI_COMMAND` environment variable for Orca commands. Inspect
-durable state and take the smallest necessary orchestration action.
+Use the configured Orca CLI to inspect durable state and take the smallest
+necessary orchestration action.
 
 Required behavior:
 
@@ -173,10 +590,43 @@ Dashboard / progress-manifest contract:
 Cross-project resource isolation is mandatory.
 Do not manipulate UNKNOWN_OWNERSHIP or OTHER_RUN_OR_PROJECT processes.
 
-DSH reviewer rule:
-use only
-dsh-orca --profile headless "<review task>"
-and never raw dsh.
+Provider routing contract:
+
+The resolved Executor and Reviewer providers above are authoritative for
+new work in this coordination turn.
+
+Routing A: executor=claude, reviewer=dsh
+
+- Executor uses the existing Orca-native route:
+  worker-start --agent claude
+- Do not pass provider/model overrides through Orca.
+- DSH Reviewer uses a custom Orca shell terminal plus formal Task/Dispatch.
+- Invoke only:
+  dsh-orca --profile headless "<review task>"
+- Never use raw dsh.
+- Never use worker-start --agent dsh.
+
+Routing B: executor=dsh, reviewer=claude
+
+- DSH remains a non-native Orca provider.
+- Never use worker-start --agent dsh.
+- DSH Executor uses a custom Orca shell terminal plus formal Task/Dispatch
+  and the installed adapter:
+  orca-dsh-executor
+- The exact Orca Dispatch preamble remains authoritative for Task ID,
+  Dispatch ID, assignee handle, heartbeat, question, escalation and
+  worker_done provenance.
+- Claude Reviewer uses an independent review Task/Dispatch and:
+  orca-claude-reviewer
+- Claude Reviewer is review-only and must not modify source files.
+- Executor and Reviewer must remain different providers.
+
+Adapters do not authorize work by themselves.
+A valid Orca Task and formal Dispatch are still required.
+
+Do not silently fall back to the other provider pair because of launcher,
+authentication, quota or procedural failure. Preserve the SAME Run and
+completed evidence, diagnose the issue, or return a blocker.
 
 Routine lifecycle decisions should be handled by you.
 
@@ -300,7 +750,6 @@ def run_kimi(args, state_dir, reason, event_text=""):
     env["ORCA_SUPERVISOR_MODE"] = "1"
     env["ORCA_SUPERVISOR_RUN"] = args.run
     env["ORCA_SUPERVISOR_PROJECT"] = args.project
-    env["ORCA_CLI_COMMAND"] = args.orca_cli
 
     cmd = [
         "claude",
@@ -357,7 +806,6 @@ def run_terra(args, state_dir, reason, kimi_result, event_text=""):
     env["ORCA_SUPERVISOR_MODE"] = "1"
     env["ORCA_SUPERVISOR_RUN"] = args.run
     env["ORCA_SUPERVISOR_PROJECT"] = args.project
-    env["ORCA_CLI_COMMAND"] = args.orca_cli
 
     cmd = [
         "codex",
@@ -436,7 +884,7 @@ def coordinate(args, state_dir, reason, event_text=""):
 
 def wait_for_event(args):
     cmd = [
-        args.orca_cli,
+        orca_cli_name(),
         "orchestration",
         "check",
         "--run",
@@ -469,6 +917,24 @@ def wait_for_event(args):
     if not payload:
         return None, None, None
 
+    # `orca orchestration check --wait --json` returns a valid JSON
+    # envelope even when the wait times out with zero matching messages.
+    # Treat that as "no event" rather than waking KIMI.
+    try:
+        import json as _json
+        envelope = _json.loads(payload)
+        result = (
+            envelope.get("result")
+            if isinstance(envelope, dict)
+            else None
+        )
+        if isinstance(result, dict) and result.get("count") == 0:
+            return None, None, None
+    except (ValueError, TypeError):
+        # Preserve previous behavior for unexpected output. A malformed
+        # payload should still be surfaced rather than silently discarded.
+        pass
+
     digest = hashlib.sha256(
         payload.encode("utf-8", errors="replace")
     ).hexdigest()
@@ -487,16 +953,12 @@ def should_stop_for_status(status):
 def self_test():
     print(f"Orca Supervisor v{VERSION} self-test")
 
-    required = (
-        ("python", sys.executable),
-        (orca_cli_name(), shutil.which(orca_cli_name())),
-        ("claude", shutil.which("claude")),
-        ("codex", shutil.which("codex")),
-    )
+    required = ("python" if os.name == "nt" else "python3", orca_cli_name(), "claude", "codex")
 
     failed = False
 
-    for binary, path in required:
+    for binary in required:
+        path = shutil.which(binary)
         print(f"{binary:12s}: {path or 'MISSING'}")
         failed |= path is None
 
@@ -504,8 +966,8 @@ def self_test():
         return 1
 
     print("coordinator    : KIMI via Claude Code --model opus")
-    print("executor       : unchanged Orca Claude route / GLM config")
-    print("reviewer       : DSH / DeepSeek")
+    print("executor       : role-configurable: claude or dsh")
+    print("reviewer       : role-configurable: dsh or claude")
     print("arbitrator     : GPT-5.6 Terra, explicit escalation only")
     print("default audit  : 60 min")
     print("process kill   : NEVER")
@@ -558,6 +1020,12 @@ def main():
         action="store_true",
     )
 
+    parser.add_argument(
+        "--check-binding",
+        action="store_true",
+        help="verify or safely establish this terminal's Run binding, then exit",
+    )
+
     args = parser.parse_args()
 
     if args.self_test:
@@ -575,28 +1043,53 @@ def main():
             f"ERROR: project does not exist: {args.project}"
         )
 
-    args.orca_cli = require_binary(orca_cli_name())
+    required = (orca_cli_name(),) if args.check_binding else (
+        orca_cli_name(),
+        "claude",
+        "codex",
+    )
 
-    for binary in ("claude", "codex"):
+    for binary in required:
         require_binary(binary)
 
     run_key = safe_name(args.run)
 
-    state_root = Path(
-        os.environ.get(
-            "LOCALAPPDATA",
-            Path.home() / ".local" / "state",
-        )
+    state_dir = (
+        Path.home()
+        / ".local"
+        / "state"
+        / "orca-supervisor"
+        / run_key
     )
-    state_dir = state_root / "orca-supervisor" / run_key
 
     state_dir.mkdir(parents=True, exist_ok=True)
 
     lock_path = state_dir / "supervisor-v1.1.lock"
-    lock_file = acquire_lock(lock_path, args.run)
+    lock_file = lock_path.open("w")
+
+    try:
+        fcntl.flock(
+            lock_file.fileno(),
+            fcntl.LOCK_EX | fcntl.LOCK_NB,
+        )
+    except BlockingIOError:
+        raise SystemExit(
+            f"ERROR: Supervisor already active for {args.run}"
+        )
+
+    lock_file.write(str(os.getpid()))
+    lock_file.flush()
 
     signal.signal(signal.SIGINT, request_stop)
     signal.signal(signal.SIGTERM, request_stop)
+
+    try:
+        ensure_run_binding(args.run)
+    except RuntimeError as exc:
+        raise SystemExit(f"ERROR: {exc}")
+
+    if args.check_binding:
+        return 0
 
     say(f"Orca Supervisor v{VERSION} started")
     say(f"Run         : {args.run}")
@@ -604,6 +1097,33 @@ def main():
     say("Coordinator : KIMI / Kimi-K3[1M]")
     say(f"Arbitrator  : {args.arbitrator}")
     say(f"Audit       : {args.audit_min} min")
+
+    startup_role = resolve_role_config(
+        args.project,
+        args.run,
+    )
+
+    if startup_role.get("error"):
+        say("Frozen routing: UNRESOLVED / BLOCKED")
+        say(
+            "Role source   : "
+            f"{startup_role.get('source', 'unknown')}"
+        )
+        say(
+            "Role error    : "
+            f"{startup_role.get('error', 'unknown error')}"
+        )
+    else:
+        say(
+            "Frozen routing: "
+            f"{startup_role['executor']} -> "
+            f"{startup_role['reviewer']}"
+        )
+        say(
+            "Role source   : "
+            f"{startup_role['source']}"
+        )
+
     say("Ctrl+C stops only Supervisor.")
 
     last_coordination = time.monotonic()

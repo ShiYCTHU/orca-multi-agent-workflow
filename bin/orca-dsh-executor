@@ -1,0 +1,134 @@
+#!/usr/bin/env python3
+
+import argparse
+from pathlib import Path
+import shutil
+import subprocess
+import sys
+
+
+def read_text(path):
+    p = Path(path).expanduser().resolve()
+
+    if not p.exists():
+        raise SystemExit(f"ERROR: file does not exist: {p}")
+
+    if not p.is_file():
+        raise SystemExit(f"ERROR: not a regular file: {p}")
+
+    return p.read_text(encoding="utf-8", errors="replace")
+
+
+def build_prompt(preamble, task):
+    return f"""You are the IMPLEMENTATION EXECUTOR for an Orca multi-agent Run.
+
+You are running through the canonical DSH / DeepSeek Harness path.
+
+The Orca Dispatch preamble below is authoritative for lifecycle identity,
+Task ID, Dispatch ID, terminal handle, heartbeat, questions, escalation,
+and worker_done reporting.
+
+Follow it exactly.
+
+Do not invent another Task or Dispatch.
+Do not create a new Run.
+Do not send lifecycle messages using stale IDs.
+Do not modify files outside the Task's authorized scope.
+Do not perform destructive git operations unless the Task explicitly allows it.
+Preserve unrelated user work in dirty worktrees.
+
+You are an Executor, not a Reviewer.
+You MAY modify files only when the Task authorizes those modifications.
+You MUST perform the requested bounded implementation and validation work.
+
+At completion:
+- obey the Dispatch preamble's worker_done instructions exactly;
+- send worker_done exactly once;
+- include the real Task ID and Dispatch ID;
+- then stop work.
+
+================ ORCA DISPATCH PREAMBLE ================
+
+{preamble}
+
+================ EXECUTOR TASK ================
+
+{task}
+"""
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="Run DSH / DeepSeek as an Orca implementation Executor."
+    )
+
+    parser.add_argument(
+        "--preamble-file",
+        required=True,
+        help="File containing the exact Orca dispatch preamble.",
+    )
+
+    parser.add_argument(
+        "--task-file",
+        required=True,
+        help="File containing the bounded Executor task.",
+    )
+
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Validate inputs and print the composed prompt without invoking DSH.",
+    )
+
+    args = parser.parse_args()
+
+    dsh = shutil.which("dsh-orca")
+    if not dsh:
+        raise SystemExit("ERROR: dsh-orca not found in PATH")
+
+    preamble = read_text(args.preamble_file)
+    task = read_text(args.task_file)
+
+    required_preamble_markers = (
+        "Your task ID is:",
+        "worker_done",
+        "--dispatch-id",
+        "--from",
+    )
+
+    missing = [
+        marker
+        for marker in required_preamble_markers
+        if marker not in preamble
+    ]
+
+    if missing:
+        raise SystemExit(
+            "ERROR: preamble is missing required Orca lifecycle markers: "
+            + ", ".join(missing)
+        )
+
+    if not task.strip():
+        raise SystemExit("ERROR: task file is empty")
+
+    prompt = build_prompt(preamble, task)
+
+    if args.dry_run:
+        print(prompt)
+        return
+
+    result = subprocess.run(
+        [
+            dsh,
+            "--profile",
+            "headless",
+            prompt,
+        ],
+        check=False,
+    )
+
+    raise SystemExit(result.returncode)
+
+
+if __name__ == "__main__":
+    main()

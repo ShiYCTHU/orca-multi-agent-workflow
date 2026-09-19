@@ -15,17 +15,72 @@ This is the ONLY active default Orca architecture.
 - Routine Runtime Coordinator:
   KIMI through `orca-kimi`
 
-- Implementation Executor:
-  Claude through `worker-start --agent claude`
-
-- Executor backend:
-  owned by Claude Code configuration; currently GLM
-
-- Independent Reviewer:
-  DSH / DeepSeek through `dsh-orca`
-
 - Strategic Arbitrator:
   GPT-5.6 Terra, only after explicit escalation
+
+Executor and independent Reviewer are role-configurable.
+
+Supported provider routings:
+
+Routing A:
+
+`Executor = claude`
+`Reviewer = dsh`
+
+- Claude Executor uses the Orca-native worker route.
+- Claude Code owns its configured backend, currently GLM.
+- DSH / DeepSeek performs independent review.
+
+Routing B:
+
+`Executor = dsh`
+`Reviewer = claude`
+
+- DSH / DeepSeek performs implementation through the Orca DSH Executor adapter.
+- Claude Code using its configured backend performs independent review.
+
+Executor and Reviewer MUST use different providers.
+
+The project default provider pair is stored in:
+
+`<project>/.orca/role_config.json`
+
+For every supervised Run, `orca-supervisor` freezes the resolved provider
+pair into:
+
+`<project>/.orca/roles/<run_id>.json`
+
+Supervisor startup routing visibility:
+
+Whenever `orca-supervisor` starts for a real Run, it resolves the Run role
+snapshot before the first coordination turn and prints the effective frozen
+routing in the startup log, for example:
+
+`Frozen routing: dsh -> claude`
+
+It also prints the authoritative role snapshot source.
+
+If a safe frozen routing cannot be resolved, including an unfrozen legacy
+Run whose historical provider pair cannot be inferred safely, startup must
+show:
+
+`Frozen routing: UNRESOLVED / BLOCKED`
+
+The Supervisor must never display a guessed provider pair as authoritative.
+
+Legacy Run migration rule:
+
+Runs created before Run-level role freezing was deployed may not have a
+`.orca/roles/<run_id>.json` snapshot. If such a Run is resumed without a
+snapshot, the Supervisor MUST NOT infer its historical provider pair from
+the project's current default. It must block until the provider pair is
+backfilled from durable evidence. Existing snapshots always remain
+authoritative.
+
+That Run snapshot is authoritative for the lifetime of the Run.
+
+Changing the project default later MUST NOT alter an already-frozen Run.
+A newly created Run may freeze the new project default.
 
 The historical `orca-luna` / GPT-5.6 Luna coordinator architecture is
 LEGACY and MUST NOT be selected as the default workflow.
@@ -96,8 +151,8 @@ Runtime Coordinator and must:
 3. create exactly one fresh Orca Run for a fresh task;
 4. persist the authoritative task plan into durable project/Orca state;
 5. create/dispatch only currently authorized work;
-6. use `worker-start --agent claude` for implementation Executor work;
-7. use `dsh-orca --profile headless "<review task>"` for independent review;
+6. resolve the Run's frozen Executor/Reviewer provider pair before dispatch;
+7. obey the active Routing A or Routing B provider contract;
 8. use Terra only for genuine strategic arbitration;
 9. never remain alive waiting for workers, reviewers, monitors, or CFD jobs;
 10. report the actual Run ID, Task ID(s), Dispatch ID(s), and terminal(s);
@@ -203,17 +258,16 @@ completion message.
 
 ## 8. Executor rule
 
-Canonical Executor route:
+The Executor route is determined by the Run's frozen role snapshot.
+
+Routing A — Claude Executor:
 
 `worker-start --agent claude`
 
 Do not pass GLM/KIMI/provider model overrides through Orca.
-
 Claude Code's own configuration owns its backend.
 
-Coordinator and Executor must remain separate sessions/processes.
-
-## 9. Reviewer rule
+Routing B — DSH Executor:
 
 DSH is not a native Orca worker.
 
@@ -221,17 +275,70 @@ Never use:
 
 `worker-start --agent dsh`
 
-Never fall back to:
+A DSH Executor requires:
+
+- a custom Orca shell terminal;
+- a formal Orca Task;
+- a formal Dispatch to that terminal;
+- the exact Dispatch preamble;
+- the installed adapter `orca-dsh-executor`.
+
+The Dispatch preamble is authoritative for Task ID, Dispatch ID,
+assignee terminal, heartbeat, question, escalation, and worker_done
+provenance.
+
+Coordinator and Executor must remain separate sessions/processes.
+
+## 9. Reviewer rule
+
+The independent Reviewer route is determined by the Run's frozen role
+snapshot.
+
+Routing A — DSH Reviewer:
+
+DSH is not a native Orca worker.
+
+Never use:
+
+`worker-start --agent dsh`
+
+Never use raw:
 
 `dsh ...`
 
-Canonical Reviewer invocation:
+The canonical DSH runtime is:
 
 `dsh-orca --profile headless "<review task>"`
 
-Do not invent unsupported DSH lifecycle commands.
+It must still operate under a formal Orca Task/Dispatch lifecycle.
+
+Routing B — Claude Reviewer:
+
+Use an independent review Task and Dispatch together with:
+
+`orca-claude-reviewer`
+
+Claude Reviewer is review-only. It must not modify, create, delete,
+rename, format, or repair project source files.
+
+The adapter parses exactly one final verdict:
+
+`FINAL_VERDICT: PASS`
+
+or
+
+`FINAL_VERDICT: CHANGES_REQUIRED`
+
+or
+
+`FINAL_VERDICT: ESCALATION_REQUIRED`
+
+and performs formal Orca worker_done settlement.
 
 Implementation agents must not self-certify independent review.
+
+Provider failure, authentication failure, quota failure, or launcher
+failure MUST NOT silently switch the Run to the opposite provider pair.
 
 ## 10. Terra escalation
 
@@ -458,3 +565,26 @@ Dashboard failure must never be treated as Run failure.
 `orca-luna` remains legacy and is not restored by the Dashboard.
 
 <!-- ORCA_DASHBOARD_SKILL_V1_END -->
+
+## 2026-09-19 Orca compatibility requirements
+
+The current Orca/Supervisor integration has three global compatibility
+requirements.
+
+1. Successful Run-role resolution may omit the `error` key. Use tolerant
+   access such as:
+
+   `role_error = role.get("error") or "(none)"`
+
+2. `orca orchestration check --wait --json` may return a timeout envelope
+   with `result.count == 0` and an empty `messages` list. This is NOT an
+   Orca event and MUST NOT wake KIMI with `reason=ORCA_EVENT`.
+
+3. The terminal consuming the Run mailbox must be bound to the target Run.
+   Before starting the long-lived Supervisor, check the current binding with
+   `orca orchestration run-current --json`. Use
+   `orca orchestration run-use --id <run_id> --json` only when binding or
+   rebinding is actually required.
+
+Do not bind a Supervisor/coordinator mailbox to an Executor terminal merely
+because that terminal is live.

@@ -5,10 +5,19 @@ Portable Windows and Ubuntu package for the current supervised Orca architecture
 ```text
 Supervisor v1.1
   -> KIMI short-lived Coordinator
-      -> Claude Executor (backend configured as GLM in Claude Code)
-      -> DSH / DeepSeek independent Reviewer
-      -> GPT-5.6 Terra strategic Arbitrator (explicit escalation only)
+      -> role-configured Executor
+      -> independent role-configured Reviewer
+      -> GPT-5.6 Terra strategic Arbitrator
 ```
+
+Supported provider pairs:
+
+- Routing A: Claude / configured backend Executor -> DSH / DeepSeek Reviewer
+- Routing B: DSH / DeepSeek Executor -> Claude / configured backend Reviewer
+
+Project default routing lives in `.orca/role_config.json`.
+Each supervised Run freezes its effective pair in
+`.orca/roles/<run_id>.json`.
 
 GPT-5.6 Luna / `orca-luna` is legacy and is not installed by this repository.
 
@@ -21,6 +30,10 @@ GPT-5.6 Luna / `orca-luna` is legacy and is not installed by this repository.
 - `bin/orca-kimi`: short-lived KIMI coordinator launcher.
 - `bin/orca-terra`: GPT-5.6 Terra arbitrator launcher.
 - `bin/orca-init`: adds the current project-local workflow documents without overwriting existing files.
+
+- `bin/orca-role-config`: manages project defaults and inspects frozen Run routing.
+- `bin/orca-dsh-executor`: Routing B DSH Executor adapter.
+- `bin/orca-claude-reviewer`: Routing B independent Claude Reviewer adapter.
 - `bin/dsh-orca`: DSH / DeepSeek reviewer launcher.
 - `skill/orca-multi-agent`: Codex skill and the current workflow references.
 - `install.ps1` and `windows/`: native Windows installer and launchers.
@@ -88,6 +101,46 @@ If the other machine already has an older copy, review it first, then run:
 Ensure `~/.local/bin` is in `PATH`, then restart Codex Desktop so it discovers the skill.
 
 ## Configure and use
+
+
+### Choose provider routing
+
+Routing A is the default:
+
+    orca-init
+
+Explicit Routing A:
+
+    orca-init --executor claude --reviewer dsh
+
+Explicit Routing B:
+
+    orca-init --executor dsh --reviewer claude
+
+On native Windows PowerShell:
+
+    orca-init -Executor claude -Reviewer dsh
+    orca-init -Executor dsh -Reviewer claude
+
+Changing the project default affects only future, not-yet-frozen Runs.
+Existing `.orca/roles/<run_id>.json` snapshots remain authoritative.
+
+Inspect project default:
+
+    orca-role-config show --project "$PWD"
+
+Inspect a frozen Run:
+
+    orca-role-config show-run --project "$PWD" --run REAL_RUN_ID
+
+Supervisor startup prints the effective frozen provider pair.
+
+Legacy Runs without a trustworthy snapshot block rather than guessing
+historical roles.
+
+Before starting the long-lived Supervisor, the coordinator terminal must
+be bound to the target Run. `orca-supervise-ui` performs the required
+`run-current` / conditional `run-use` check.
 
 1. Configure Claude Code so its own default backend is GLM; do not pass a provider model through Orca.
 2. On Ubuntu/WSL, create `~/.config/dsh/orca.env` with the environment required by DSH and protect it with `chmod 600`. On native Windows, use DSH's normal user environment/configuration.

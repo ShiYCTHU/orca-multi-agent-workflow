@@ -15,6 +15,9 @@ sources=(
   bin/orca-kimi
   bin/orca-terra
   bin/orca-init
+  bin/orca-role-config
+  bin/orca-dsh-executor
+  bin/orca-claude-reviewer
   bin/dsh-orca
   skill/orca-multi-agent/SKILL.md
   skill/orca-multi-agent/references/workflow.md

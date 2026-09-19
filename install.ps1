@@ -23,6 +23,12 @@ $files = @(
     @{ Source = 'windows/orca-terra.cmd'; Target = (Join-Path $binDir 'orca-terra.cmd') }
     @{ Source = 'windows/orca-init.cmd'; Target = (Join-Path $binDir 'orca-init.cmd') }
     @{ Source = 'windows/orca-init.ps1'; Target = (Join-Path $binDir 'orca-init.ps1') }
+    @{ Source = 'bin/orca-role-config'; Target = (Join-Path $binDir 'orca-role-config.py') }
+    @{ Source = 'windows/orca-role-config.cmd'; Target = (Join-Path $binDir 'orca-role-config.cmd') }
+    @{ Source = 'bin/orca-dsh-executor'; Target = (Join-Path $binDir 'orca-dsh-executor.py') }
+    @{ Source = 'windows/orca-dsh-executor.cmd'; Target = (Join-Path $binDir 'orca-dsh-executor.cmd') }
+    @{ Source = 'bin/orca-claude-reviewer'; Target = (Join-Path $binDir 'orca-claude-reviewer.py') }
+    @{ Source = 'windows/orca-claude-reviewer.cmd'; Target = (Join-Path $binDir 'orca-claude-reviewer.cmd') }
     @{ Source = 'windows/dsh-orca.cmd'; Target = (Join-Path $binDir 'dsh-orca.cmd') }
     @{ Source = 'skill/orca-multi-agent/SKILL.md'; Target = (Join-Path $skillDir 'SKILL.md') }
     @{ Source = 'skill/orca-multi-agent/references/workflow.md'; Target = (Join-Path $skillDir 'references\workflow.md') }

@@ -9,9 +9,59 @@ Architecture:
         v
     KIMI short-lived Coordinator
         |
-        +--> Claude / configured GLM Executor
-        +--> DSH / DeepSeek Reviewer
+        +--> role-configured Executor
+        +--> independent role-configured Reviewer
         +--> GPT-5.6 Terra strategic arbitration
+
+Supported provider pairs:
+
+Routing A:
+
+`Claude / configured GLM Executor -> DSH / DeepSeek Reviewer`
+
+Routing B:
+
+`DSH / DeepSeek Executor -> Claude / configured backend Reviewer`
+
+The project-level default is stored in:
+
+`<project>/.orca/role_config.json`
+
+For each supervised Run, the selected roles are frozen in:
+
+`<project>/.orca/roles/<run_id>.json`
+
+Supervisor startup routing visibility:
+
+Whenever `orca-supervisor` starts for a real Run, it resolves the Run role
+snapshot before the first coordination turn and prints the effective frozen
+routing in the startup log, for example:
+
+`Frozen routing: dsh -> claude`
+
+It also prints the authoritative role snapshot source.
+
+If a safe frozen routing cannot be resolved, including an unfrozen legacy
+Run whose historical provider pair cannot be inferred safely, startup must
+show:
+
+`Frozen routing: UNRESOLVED / BLOCKED`
+
+The Supervisor must never display a guessed provider pair as authoritative.
+
+Legacy Run migration rule:
+
+Runs created before Run-level role freezing was deployed may not have a
+`.orca/roles/<run_id>.json` snapshot. If such a Run is resumed without a
+snapshot, the Supervisor MUST NOT infer its historical provider pair from
+the project's current default. It must block until the provider pair is
+backfilled from durable evidence. Existing snapshots always remain
+authoritative.
+
+The Run snapshot is authoritative after it exists.
+
+Changing the project default later affects only Runs that have not yet
+been frozen.
 
 The current default Runtime Coordinator is KIMI.
 
@@ -25,6 +75,7 @@ If another global Orca document conflicts with this file regarding:
 - Supervisor ownership;
 - Executor routing;
 - Reviewer routing;
+- Run role freezing;
 - Terra escalation;
 
 THIS FILE governs global orchestration mechanics.
@@ -44,17 +95,62 @@ It performs ONE bounded coordination turn and returns.
 
 It does not remain online waiting for long-running work.
 
-## Claude Executor
+## Routing A
 
-    worker-start --agent claude
+Claude Executor:
+
+`worker-start --agent claude`
 
 Do not override the configured backend model through Orca.
 
-## DSH Reviewer
+DSH / DeepSeek Reviewer:
 
-    dsh-orca --profile headless "<review task>"
+Use a formal Orca review Task/Dispatch and the canonical DSH runtime:
+
+`dsh-orca --profile headless "<review task>"`
 
 Never use raw `dsh`.
+
+Never use `worker-start --agent dsh`.
+
+## Routing B
+
+DSH / DeepSeek Executor:
+
+DSH is non-native and requires a custom Orca terminal, formal Task,
+formal Dispatch, exact Dispatch preamble, and:
+
+`orca-dsh-executor`
+
+Never use `worker-start --agent dsh`.
+
+Claude Reviewer:
+
+Use an independent review Task/Dispatch and:
+
+`orca-claude-reviewer`
+
+Claude Reviewer is review-only and must not modify project source files.
+
+## Run role freezing
+
+Project default:
+
+`<project>/.orca/role_config.json`
+
+Frozen Run snapshot:
+
+`<project>/.orca/roles/<run_id>.json`
+
+The first valid Supervisor resolution freezes the Run's provider pair.
+
+After freezing, later edits to the project default MUST NOT alter that
+Run.
+
+A new Run may freeze a different supported provider pair.
+
+Invalid project configuration or invalid Run snapshot is a blocker.
+Never silently substitute another provider pair.
 
 ## Terra Arbitrator
 
@@ -100,8 +196,8 @@ The prompt must require KIMI to:
 4. create exactly one fresh Run;
 5. persist the authoritative task plan;
 6. create and dispatch only currently authorized work;
-7. use Claude for implementation;
-8. use DSH for independent review;
+7. resolve and obey the Run's frozen Executor/Reviewer provider pair;
+8. follow Routing A or Routing B without silent provider fallback;
 9. use Terra only for strategic escalation;
 10. not wait for workers/Reviewers/CFD;
 11. return actual:
@@ -193,10 +289,32 @@ Unknown and other-project resources are read-only.
 
 # Model-role separation
 
-    Coordinator  = KIMI
-    Executor     = Claude / configured GLM backend
-    Reviewer     = DSH / DeepSeek
-    Arbitrator   = GPT-5.6 Terra
+Coordinator:
+
+`KIMI`
+
+Routing A:
+
+`Executor = Claude / configured GLM backend`
+
+`Reviewer = DSH / DeepSeek`
+
+Routing B:
+
+`Executor = DSH / DeepSeek`
+
+`Reviewer = Claude / configured backend`
+
+Arbitrator:
+
+`GPT-5.6 Terra`
+
+Executor and Reviewer must always use different providers.
+
+Role selection is project-configurable but Run-frozen.
+
+No provider may silently assume the other provider's role because of
+launcher failure, authentication failure, quota, or procedural error.
 
 # Historical policy
 
@@ -382,3 +500,26 @@ orca-supervisor --run REAL_RUN_ID --project /absolute/project/path --no-initial-
 Do not use placeholder Run IDs in executable commands.
 
 <!-- ORCA_SUPERVISE_UI_V1_END -->
+
+## 2026-09-19 Orca compatibility requirements
+
+The current Orca/Supervisor integration has three global compatibility
+requirements.
+
+1. Successful Run-role resolution may omit the `error` key. Use tolerant
+   access such as:
+
+   `role_error = role.get("error") or "(none)"`
+
+2. `orca orchestration check --wait --json` may return a timeout envelope
+   with `result.count == 0` and an empty `messages` list. This is NOT an
+   Orca event and MUST NOT wake KIMI with `reason=ORCA_EVENT`.
+
+3. The terminal consuming the Run mailbox must be bound to the target Run.
+   Before starting the long-lived Supervisor, check the current binding with
+   `orca orchestration run-current --json`. Use
+   `orca orchestration run-use --id <run_id> --json` only when binding or
+   rebinding is actually required.
+
+Do not bind a Supervisor/coordinator mailbox to an Executor terminal merely
+because that terminal is live.

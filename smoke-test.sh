@@ -4,11 +4,10 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 bash -n "$ROOT/install.sh" "$ROOT"/bin/orca-{kimi,terra,init,supervise-ui} "$ROOT/bin/dsh-orca"
-python3 - "$ROOT/bin/orca-supervisor" "$ROOT/bin/orca-progress" "$ROOT/bin/orca-dashboard" <<'PY'
+python3 - "$ROOT/bin/orca-supervisor" "$ROOT/bin/orca-progress" "$ROOT/bin/orca-dashboard" "$ROOT/bin/orca-role-config" "$ROOT/bin/orca-dsh-executor" "$ROOT/bin/orca-claude-reviewer" <<'PY'
 from pathlib import Path
 import os
 import sys
-from tempfile import TemporaryDirectory
 
 path = Path(sys.argv[1])
 for script in sys.argv[1:]:
@@ -22,16 +21,11 @@ assert "Dashboard failure alone is not" in prompt
 os.environ["ORCA_CLI_COMMAND"] = "custom-orca"
 assert namespace["orca_cli_name"]() == "custom-orca"
 del os.environ["ORCA_CLI_COMMAND"]
-with TemporaryDirectory() as directory:
-    lock_path = Path(directory) / "supervisor.lock"
-    lock = namespace["acquire_lock"](lock_path, "smoke")
-    try:
-        namespace["acquire_lock"](lock_path, "smoke")
-    except SystemExit:
-        pass
-    else:
-        raise AssertionError("duplicate supervisor lock was accepted")
-    lock.close()
+
+supervisor_source = path.read_text()
+
+assert 'supervisor-v1.1.lock' in supervisor_source
+assert 'fcntl.LOCK_EX | fcntl.LOCK_NB' in supervisor_source
 PY
 
 temporary_project="$(mktemp -d)"
@@ -47,6 +41,12 @@ test -x "$ROOT/bin/orca-supervisor"
 test -x "$ROOT/bin/orca-progress"
 test -x "$ROOT/bin/orca-dashboard"
 test -x "$ROOT/bin/orca-supervise-ui"
+test -x "$ROOT/bin/orca-role-config"
+test -x "$ROOT/bin/orca-dsh-executor"
+test -x "$ROOT/bin/orca-claude-reviewer"
+test -f "$ROOT/windows/orca-role-config.cmd"
+test -f "$ROOT/windows/orca-dsh-executor.cmd"
+test -f "$ROOT/windows/orca-claude-reviewer.cmd"
 
 if grep -RIEq '/home/[^/]+|/Users/[^/]+|gh[pousr]_[[:alnum:]]{20,}|sk-[[:alnum:]_-]{20,}|AKIA[0-9A-Z]{16}|(api[_-]?key|token|secret|password)[[:space:]]*[:=][[:space:]]*[^$<[:space:]]+' \
   "$ROOT/bin" "$ROOT/windows" "$ROOT/skill" "$ROOT/README.md" "$ROOT/install.ps1"; then

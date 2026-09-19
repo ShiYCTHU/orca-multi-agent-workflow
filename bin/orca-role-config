@@ -1,0 +1,229 @@
+#!/usr/bin/env python3
+
+import argparse
+import json
+import os
+from pathlib import Path
+import sys
+import tempfile
+
+ALLOWED = {
+    ("claude", "dsh"),
+    ("dsh", "claude"),
+}
+
+DEFAULT = {
+    "schema_version": 1,
+    "executor": "claude",
+    "reviewer": "dsh",
+}
+
+
+def resolve_project(value):
+    p = Path(value).expanduser().resolve()
+    if not p.exists() or not p.is_dir():
+        raise SystemExit(f"ERROR: project directory does not exist: {p}")
+    return p
+
+
+def config_path(project):
+    return project / ".orca" / "role_config.json"
+
+
+def run_snapshot_path(project, run_id):
+    safe = "".join(
+        ch if ch.isalnum() or ch in "._-" else "_"
+        for ch in str(run_id)
+    )
+    return project / ".orca" / "roles" / f"{safe}.json"
+
+
+def validate(data):
+    if not isinstance(data, dict):
+        raise ValueError("config must be a JSON object")
+
+    executor = data.get("executor")
+    reviewer = data.get("reviewer")
+
+    if (executor, reviewer) not in ALLOWED:
+        raise ValueError(
+            "unsupported role combination: "
+            f"executor={executor!r}, reviewer={reviewer!r}"
+        )
+
+    if executor == reviewer:
+        raise ValueError("executor and reviewer must be different providers")
+
+    return {
+        "schema_version": 1,
+        "executor": executor,
+        "reviewer": reviewer,
+    }
+
+
+def atomic_write(path, data):
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+    fd, tmp = tempfile.mkstemp(
+        prefix=path.name + ".",
+        suffix=".tmp",
+        dir=str(path.parent),
+    )
+
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2, ensure_ascii=False)
+            f.write("\n")
+            f.flush()
+            os.fsync(f.fileno())
+
+        os.replace(tmp, path)
+
+    finally:
+        if os.path.exists(tmp):
+            os.unlink(tmp)
+
+
+def load(project):
+    path = config_path(project)
+
+    if not path.exists():
+        data = dict(DEFAULT)
+        data["source"] = "default"
+        return data
+
+    with path.open("r", encoding="utf-8") as f:
+        raw = json.load(f)
+
+    data = validate(raw)
+    data["source"] = str(path)
+    return data
+
+
+def cmd_show(args):
+    project = resolve_project(args.project)
+    data = load(project)
+
+    print(json.dumps({
+        "project": str(project),
+        **data,
+    }, indent=2, ensure_ascii=False))
+
+
+def cmd_show_run(args):
+    project = resolve_project(args.project)
+    path = run_snapshot_path(project, args.run)
+
+    if not path.exists():
+        print(f"ERROR: no frozen role snapshot for Run: {args.run}")
+        print(f"Expected: {path}")
+        raise SystemExit(1)
+
+    try:
+        with path.open("r", encoding="utf-8") as f:
+            raw = json.load(f)
+
+        data = validate(raw)
+
+        stored_run_id = raw.get("run_id")
+        if stored_run_id not in (None, args.run):
+            raise ValueError(
+                "Run snapshot identity mismatch: "
+                f"expected {args.run!r}, found {stored_run_id!r}"
+            )
+
+    except Exception as e:
+        print(f"ERROR: invalid frozen Run role snapshot: {e}")
+        raise SystemExit(1)
+
+    print(json.dumps({
+        "project": str(project),
+        "run_id": args.run,
+        "executor": data["executor"],
+        "reviewer": data["reviewer"],
+        "frozen": True,
+        "source": str(path),
+        "project_source": raw.get("project_source"),
+    }, indent=2, ensure_ascii=False))
+
+
+def cmd_set(args):
+    project = resolve_project(args.project)
+
+    data = validate({
+        "executor": args.executor,
+        "reviewer": args.reviewer,
+    })
+
+    path = config_path(project)
+    atomic_write(path, data)
+
+    print("ROLE CONFIG UPDATED")
+    print(f"Project : {project}")
+    print(f"Executor: {data['executor']}")
+    print(f"Reviewer: {data['reviewer']}")
+    print(f"Path    : {path}")
+
+
+def cmd_validate(args):
+    project = resolve_project(args.project)
+    path = config_path(project)
+
+    if not path.exists():
+        print("VALID")
+        print("Using default role routing:")
+        print("  Executor: claude")
+        print("  Reviewer: dsh")
+        return
+
+    try:
+        with path.open("r", encoding="utf-8") as f:
+            raw = json.load(f)
+
+        data = validate(raw)
+
+    except Exception as e:
+        print(f"INVALID: {e}")
+        raise SystemExit(1)
+
+    print("VALID")
+    print(f"Executor: {data['executor']}")
+    print(f"Reviewer: {data['reviewer']}")
+
+
+def build_parser():
+    p = argparse.ArgumentParser(
+        description="Manage Orca project-default roles and inspect frozen Run role snapshots."
+    )
+
+    sub = p.add_subparsers(dest="command", required=True)
+
+    s = sub.add_parser("show")
+    s.add_argument("--project", required=True)
+    s.set_defaults(func=cmd_show)
+
+    s = sub.add_parser("show-run")
+    s.add_argument("--project", required=True)
+    s.add_argument("--run", required=True)
+    s.set_defaults(func=cmd_show_run)
+
+    s = sub.add_parser("set")
+    s.add_argument("--project", required=True)
+    s.add_argument("--executor", required=True, choices=["claude", "dsh"])
+    s.add_argument("--reviewer", required=True, choices=["claude", "dsh"])
+    s.set_defaults(func=cmd_set)
+
+    s = sub.add_parser("validate")
+    s.add_argument("--project", required=True)
+    s.set_defaults(func=cmd_validate)
+
+    return p
+
+
+def main():
+    args = build_parser().parse_args()
+    args.func(args)
+
+
+if __name__ == "__main__":
+    main()

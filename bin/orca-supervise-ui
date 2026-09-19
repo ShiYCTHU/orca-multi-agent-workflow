@@ -3,6 +3,8 @@ set -euo pipefail
 
 export PATH="$HOME/.local/bin:$PATH"
 
+ORCA_CLI="${ORCA_CLI_COMMAND:-orca-ide}"
+
 RUN=""
 PROJECT=""
 PORT="8765"
@@ -68,6 +70,15 @@ echo "  $RUN"
 echo
 echo "Project:"
 echo "  $PROJECT"
+echo
+
+echo "Checking coordinator Run binding..."
+
+orca-supervisor \
+    --run "$RUN" \
+    --project "$PROJECT" \
+    --check-binding
+
 echo
 
 echo "Starting read-only Dashboard..."

@@ -16,6 +16,44 @@ if (-not (Test-Path -PathType Container $Project)) {
 }
 
 $Project = (Resolve-Path $Project).Path
+
+Write-Host 'Checking coordinator Run binding...'
+
+$currentJson = (& orca orchestration run-current --json 2>$null | Out-String)
+$currentRun = $null
+
+if ($currentJson) {
+    try {
+        $current = $currentJson | ConvertFrom-Json
+
+        if ($current.result.run -is [string]) {
+            $currentRun = $current.result.run
+        } elseif ($null -ne $current.result.run) {
+            $currentRun = $current.result.run.id
+        }
+    } catch {
+        $currentRun = $null
+    }
+}
+
+if ($currentRun -ne $Run) {
+    if ($currentRun) {
+        Write-Host "Current terminal is bound to: $currentRun"
+    } else {
+        Write-Host 'Current terminal is not bound to an Orca Run.'
+    }
+
+    Write-Host "Binding coordinator terminal to: $Run"
+
+    & orca orchestration run-use --id $Run --json
+
+    if ($LASTEXITCODE -ne 0) {
+        throw "Failed to bind coordinator terminal to Run $Run"
+    }
+} else {
+    Write-Host "Coordinator terminal already bound to: $Run"
+}
+
 $binDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $stateDir = Join-Path $HOME '.local\state\orca-dashboard'
 $safeRun = $Run -replace '[^A-Za-z0-9_.-]', '_'

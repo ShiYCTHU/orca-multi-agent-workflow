@@ -1,57 +1,206 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-if project_root="$(git rev-parse --show-toplevel 2>/dev/null)"; then
-  :
-else
-  project_root="$PWD"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+CORE="$SCRIPT_DIR/orca-init.legacy-core-20260915-133302"
+ROLE_TOOL="$SCRIPT_DIR/orca-role-config"
+
+EXECUTOR=""
+REVIEWER=""
+PASSTHRU=()
+
+usage() {
+    cat <<'EOF'
+Usage:
+  orca-init
+  orca-init --executor claude --reviewer dsh
+  orca-init --executor dsh --reviewer claude
+
+Role providers:
+  claude  Claude Code using the configured GLM backend
+  dsh     DeepSeek Harness
+
+Supported v1 combinations:
+  Executor=claude  Reviewer=dsh
+  Executor=dsh     Reviewer=claude
+
+If no role options are supplied, the existing project role configuration is
+left unchanged. If none exists, the default is claude + dsh.
+EOF
+}
+
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --executor)
+            if [ "$#" -lt 2 ]; then
+                echo "ERROR: --executor requires a value"
+                exit 2
+            fi
+            EXECUTOR="$2"
+            shift 2
+            ;;
+        --reviewer)
+            if [ "$#" -lt 2 ]; then
+                echo "ERROR: --reviewer requires a value"
+                exit 2
+            fi
+            REVIEWER="$2"
+            shift 2
+            ;;
+        -h|--help)
+            usage
+            exit 0
+            ;;
+        *)
+            PASSTHRU+=("$1")
+            shift
+            ;;
+    esac
+done
+
+if [ ! -x "$CORE" ]; then
+    echo "ERROR: clean Orca init core missing:"
+    echo "  $CORE"
+    exit 1
 fi
 
-workflow="$project_root/docs/multi_agent_workflow.md"
-claude_file="$project_root/CLAUDE.md"
-
-mkdir -p "$project_root/docs"
-
-if [[ -e "$workflow" ]]; then
-  echo "SKIP: $workflow already exists"
-else
-  cat >"$workflow" <<'DOC'
-# Project Multi-Agent Workflow
-
-## Architecture
-
-- Supervisor: deterministic `orca-supervisor` v1.1; owns long waits.
-- Runtime Coordinator: short-lived KIMI via `ORCA_SUPERVISOR_MODE=1 orca-kimi`.
-- Executor: Claude via `worker-start --agent claude`; Claude Code owns its configured GLM backend.
-- Independent Reviewer: DSH / DeepSeek via `dsh-orca --profile headless "<review task>"`.
-- Strategic Arbitrator: GPT-5.6 Terra, only after `SUPERVISOR_ESCALATE_TERRA`.
-- Legacy: GPT-5.6 Luna / `orca-luna`; never select it as the default Coordinator.
-
-## Project onboarding
-
-Before real work, record the build/test commands, protected paths, dirty worktree state, file ownership, acceptance criteria, data boundaries, and authorization for commits, deployments, worktrees, destructive actions, and expensive jobs.
-
-Preserve unrelated work and unknown/other-project processes. Do not duplicate active Runs, Tasks, Dispatches, workers, reviews, monitors, or long-running jobs.
-
-Project instructions define what must be achieved. The global `orca-multi-agent` skill defines how it is coordinated.
-DOC
-  echo "CREATE: $workflow"
+if [ ! -x "$ROLE_TOOL" ]; then
+    echo "ERROR: orca-role-config missing:"
+    echo "  $ROLE_TOOL"
+    exit 1
 fi
 
-if [[ -e "$claude_file" ]]; then
-  echo "SKIP: $claude_file already exists"
-else
-  cat >"$claude_file" <<'DOC'
-# Claude Executor Instructions
-
-You are the bounded implementation Executor, not the Runtime Coordinator or independent Reviewer.
-
-Read `docs/multi_agent_workflow.md`, preserve the dirty worktree, follow the assigned Orca Task/Dispatch scope and acceptance criteria, use Claude Code's configured backend, validate your work, and return one valid `worker_done` through the assigned Dispatch context.
-
-Do not redefine goals, expand scope, modify unauthorized files, self-approve independent review, or pass a provider model override through Orca.
-DOC
-  echo "CREATE: $claude_file"
+if { [ -n "$EXECUTOR" ] && [ -z "$REVIEWER" ]; } || \
+   { [ -z "$EXECUTOR" ] && [ -n "$REVIEWER" ]; }; then
+    echo "ERROR: --executor and --reviewer must be specified together"
+    exit 2
 fi
 
-echo 'Project layer ready.'
-echo 'Next: ORCA_SUPERVISOR_MODE=1 orca-kimi'
+if [ -n "$EXECUTOR" ]; then
+    case "$EXECUTOR:$REVIEWER" in
+        claude:dsh|dsh:claude)
+            ;;
+        *)
+            echo "ERROR: unsupported role combination:"
+            echo "  Executor=$EXECUTOR"
+            echo "  Reviewer=$REVIEWER"
+            echo
+            echo "Supported:"
+            echo "  claude + dsh"
+            echo "  dsh + claude"
+            exit 2
+            ;;
+    esac
+fi
+
+"$CORE" "${PASSTHRU[@]}"
+
+if PROJECT_ROOT="$(git rev-parse --show-toplevel 2>/dev/null)"; then
+    :
+else
+    PROJECT_ROOT="$PWD"
+fi
+
+DOC="$PROJECT_ROOT/docs/multi_agent_workflow.md"
+mkdir -p "$PROJECT_ROOT/docs"
+
+if [ -n "$EXECUTOR" ]; then
+    "$ROLE_TOOL" set \
+        --project "$PROJECT_ROOT" \
+        --executor "$EXECUTOR" \
+        --reviewer "$REVIEWER"
+fi
+
+ROLE_JSON="$("$ROLE_TOOL" show --project "$PROJECT_ROOT")"
+
+python3 - "$DOC" "$ROLE_JSON" <<'PY'
+from pathlib import Path
+import json
+import sys
+
+p = Path(sys.argv[1])
+role = json.loads(sys.argv[2])
+
+executor = role["executor"]
+reviewer = role["reviewer"]
+
+start = "<!-- ORCA_CURRENT_ARCHITECTURE_START -->"
+end = "<!-- ORCA_CURRENT_ARCHITECTURE_END -->"
+
+executor_text = {
+    "claude": "Claude Code using the configured GLM backend",
+    "dsh": "DSH / DeepSeek",
+}[executor]
+
+reviewer_text = {
+    "claude": "Claude Code using the configured GLM backend",
+    "dsh": "DSH / DeepSeek",
+}[reviewer]
+
+block = f"""<!-- ORCA_CURRENT_ARCHITECTURE_START -->
+# Current Orca architecture
+
+This project uses the current global Orca architecture:
+
+- Deterministic Supervisor: `orca-supervisor` v1.1
+- Runtime Coordinator: KIMI via `orca-kimi`
+- Executor provider: {executor_text}
+- Independent Reviewer provider: {reviewer_text}
+- Strategic Arbitrator: GPT-5.6 Terra on explicit escalation only
+- Progress UI: read-only Orca Dashboard v1
+
+Current lifecycle:
+
+User / Strategic Master
+→ deterministic Supervisor
+→ short-lived KIMI Coordinator
+→ Executor
+→ independent Reviewer
+→ Terra only when strategic arbitration is required
+
+Current role routing:
+
+- Executor: `{executor}`
+- Reviewer: `{reviewer}`
+
+Role configuration source:
+
+`{role["source"]}`
+
+The deterministic Supervisor owns long waits and lifecycle polling.
+KIMI performs bounded coordination turns and must not remain alive waiting
+for already-active workers or reviewers.
+
+The visual Dashboard is observability-only and does not authorize Tasks,
+Dispatches, phase advancement, or acceptance decisions.
+
+Global source of truth:
+
+- `~/.codex/skills/orca-multi-agent/SKILL.md`
+- `~/.codex/skills/orca-multi-agent/references/workflow.md`
+- `~/.codex/skills/orca-multi-agent/references/current_system.md`
+
+Project-specific scientific requirements and acceptance criteria remain
+authoritative below this block.
+<!-- ORCA_CURRENT_ARCHITECTURE_END -->"""
+
+old = p.read_text(errors="replace") if p.exists() else ""
+
+if start in old and end in old:
+    a = old.index(start)
+    b = old.index(end, a) + len(end)
+    text = old[:a] + block + old[b:]
+else:
+    text = block + "\n\n" + old
+
+p.write_text(text)
+PY
+
+echo
+echo "Current Orca architecture:"
+echo "  Coordinator : KIMI / orca-kimi"
+echo "  Supervisor  : orca-supervisor v1.1"
+echo "  Executor    : $("$ROLE_TOOL" show --project "$PROJECT_ROOT" | python3 -c 'import json,sys; print(json.load(sys.stdin)["executor"])')"
+echo "  Reviewer    : $("$ROLE_TOOL" show --project "$PROJECT_ROOT" | python3 -c 'import json,sys; print(json.load(sys.stdin)["reviewer"])')"
+echo "  Arbitrator  : GPT-5.6 Terra"
+echo "  Dashboard   : Orca Dashboard v1"
