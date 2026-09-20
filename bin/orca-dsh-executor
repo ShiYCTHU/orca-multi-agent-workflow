@@ -1,10 +1,25 @@
 #!/usr/bin/env python3
 
 import argparse
+import os
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import sys
+
+
+VALID_STATUSES = (
+    "SUCCEEDED",
+    "FAILED",
+)
+
+
+def orca_cli_name():
+    return os.environ.get(
+        "ORCA_CLI_COMMAND",
+        "orca" if os.name == "nt" else "orca-ide",
+    )
 
 
 def read_text(path):
@@ -19,37 +34,123 @@ def read_text(path):
     return p.read_text(encoding="utf-8", errors="replace")
 
 
+def validate_preamble(text):
+    required = (
+        "Your task ID is:",
+        "worker_done",
+        "--dispatch-id",
+        "--from",
+    )
+
+    missing = [x for x in required if x not in text]
+
+    if missing:
+        raise SystemExit(
+            "ERROR: preamble is missing required Orca lifecycle markers: "
+            + ", ".join(missing)
+        )
+
+
+def extract_lifecycle_ids(preamble):
+    task_match = re.search(
+        r"(?m)^Your task ID is:\s*(task_[A-Za-z0-9_-]+)\s*$",
+        preamble,
+    )
+
+    from_match = re.search(
+        r"--from\s+(term_[A-Za-z0-9_-]+)",
+        preamble,
+    )
+
+    dispatch_match = re.search(
+        r"--dispatch-id\s+(ctx_[A-Za-z0-9_-]+)",
+        preamble,
+    )
+
+    if not task_match:
+        raise ValueError("Task ID not found in Orca preamble")
+
+    if not from_match:
+        raise ValueError("assignee terminal handle not found in Orca preamble")
+
+    if not dispatch_match:
+        raise ValueError("Dispatch ID not found in Orca preamble")
+
+    return {
+        "task_id": task_match.group(1),
+        "terminal_id": from_match.group(1),
+        "dispatch_id": dispatch_match.group(1),
+    }
+
+
 def build_prompt(preamble, task):
+    lifecycle = extract_lifecycle_ids(preamble)
+
     return f"""You are the IMPLEMENTATION EXECUTOR for an Orca multi-agent Run.
 
 You are running through the canonical DSH / DeepSeek Harness path.
 
-The Orca Dispatch preamble below is authoritative for lifecycle identity,
-Task ID, Dispatch ID, terminal handle, heartbeat, questions, escalation,
-and worker_done reporting.
+IMPORTANT LIFECYCLE BOUNDARY
 
-Follow it exactly.
+You are responsible ONLY for the substantive bounded implementation task.
 
-Do not invent another Task or Dispatch.
-Do not create a new Run.
-Do not send lifecycle messages using stale IDs.
-Do not modify files outside the Task's authorized scope.
-Do not perform destructive git operations unless the Task explicitly allows it.
-Preserve unrelated user work in dirty worktrees.
+You MUST NOT invoke any Orca lifecycle command.
+
+Do NOT run:
+- orca orchestration send
+- orca orchestration check
+- orca orchestration ask
+- orca orchestration dispatch
+- orca orchestration task-create
+- any other Orca coordination command
+
+The deterministic outer Python adapter owns ALL Orca lifecycle settlement.
+
+The adapter has already validated the authoritative dispatch preamble.
+
+AUTHORITATIVE IDENTITY SUMMARY
+
+Task ID:
+{lifecycle["task_id"]}
+
+Dispatch ID:
+{lifecycle["dispatch_id"]}
+
+Executor terminal:
+{lifecycle["terminal_id"]}
+
+These identifiers are informational only.
+Do not use them to call Orca.
+
+ROLE CONTRACT
 
 You are an Executor, not a Reviewer.
-You MAY modify files only when the Task authorizes those modifications.
-You MUST perform the requested bounded implementation and validation work.
 
-At completion:
-- obey the Dispatch preamble's worker_done instructions exactly;
-- send worker_done exactly once;
-- include the real Task ID and Dispatch ID;
-- then stop work.
+You MAY modify files only when the bounded task explicitly authorizes them.
 
-================ ORCA DISPATCH PREAMBLE ================
+You MUST:
+- perform the requested implementation;
+- perform the requested validation;
+- preserve unrelated user work;
+- avoid destructive git operations unless explicitly authorized;
+- not create another Run, Task, Dispatch, or worker;
+- stop immediately after producing the required final output.
 
-{preamble}
+FINAL OUTPUT CONTRACT
+
+At the very end of your response, output exactly these three lines:
+
+FINAL_EXECUTOR_STATUS: SUCCEEDED
+EXECUTOR_SUMMARY: <one concise single-line summary>
+FILES_MODIFIED: <comma-separated paths, or NONE>
+
+If the bounded task cannot be completed, output:
+
+FINAL_EXECUTOR_STATUS: FAILED
+EXECUTOR_SUMMARY: <one concise single-line explanation>
+FILES_MODIFIED: <comma-separated paths, or NONE>
+
+Do not place any text after FILES_MODIFIED.
 
 ================ EXECUTOR TASK ================
 
@@ -57,9 +158,180 @@ At completion:
 """
 
 
+def parse_executor_result(output):
+    """
+    Parse only line-anchored final contract records.
+
+    DSH may mention contract field names in reasoning before its final answer,
+    so global substring counting is intentionally forbidden here.  The parser
+    selects the last complete ordered triple of anchored contract lines.
+    """
+
+    status_re = re.compile(
+        r"^FINAL_EXECUTOR_STATUS:\s*(SUCCEEDED|FAILED)\s*$",
+        re.MULTILINE,
+    )
+    summary_re = re.compile(
+        r"^EXECUTOR_SUMMARY:\s*(.+?)\s*$",
+        re.MULTILINE,
+    )
+    files_re = re.compile(
+        r"^FILES_MODIFIED:\s*(.*?)\s*$",
+        re.MULTILINE,
+    )
+
+    statuses = list(status_re.finditer(output))
+    summaries = list(summary_re.finditer(output))
+    files = list(files_re.finditer(output))
+
+    if not statuses:
+        raise ValueError(
+            "executor output does not contain a line-anchored "
+            "FINAL_EXECUTOR_STATUS"
+        )
+
+    for status_match in reversed(statuses):
+        following_summaries = [
+            m for m in summaries
+            if m.start() > status_match.end()
+        ]
+
+        if not following_summaries:
+            continue
+
+        summary_match = following_summaries[0]
+
+        following_files = [
+            m for m in files
+            if m.start() > summary_match.end()
+        ]
+
+        if not following_files:
+            continue
+
+        files_match = following_files[0]
+
+        intervening = output[
+            status_match.end():files_match.start()
+        ]
+
+        if re.search(
+            r"^FINAL_EXECUTOR_STATUS:",
+            intervening,
+            re.MULTILINE,
+        ):
+            continue
+
+        status = status_match.group(1).strip()
+        summary = summary_match.group(1).strip()
+        files_text = files_match.group(1).strip()
+
+        if not summary:
+            raise ValueError("EXECUTOR_SUMMARY must not be empty")
+
+        if not files_text or files_text.upper() == "NONE":
+            files_modified = []
+        else:
+            files_modified = [
+                item.strip()
+                for item in files_text.split(",")
+                if item.strip()
+            ]
+
+        return {
+            "status": status,
+            "summary": summary,
+            "files_modified": files_modified,
+            # Backward-compatible alias used by the existing settlement path.
+            "files": files_modified,
+        }
+
+    raise ValueError(
+        "executor output does not contain a complete final contract triple"
+    )
+
+
+def settle_worker_done(lifecycle, executor_result):
+    success = executor_result["status"] == "SUCCEEDED"
+
+    if success:
+        subject = "DSH executor completed"
+        body = (
+            "DSH Executor completed the bounded task through the deterministic "
+            "Orca adapter. "
+            "The adapter parsed a valid SUCCEEDED result and preserved the "
+            "authoritative Task and Dispatch identifiers. "
+            "No lifecycle work remains for this dispatch."
+        )
+        outcome = "succeeded"
+    else:
+        subject = "DSH executor failed"
+        body = (
+            "DSH Executor did not produce a valid successful completion through "
+            "the deterministic Orca adapter. "
+            "The adapter preserved the authoritative Task and Dispatch "
+            "identifiers and recorded the execution as failed. "
+            "The coordinator must inspect the executor output before deciding "
+            "the next bounded action."
+        )
+        outcome = "failed"
+
+    cmd = [
+        orca_cli_name(),
+        "orchestration",
+        "send",
+        "--from",
+        lifecycle["terminal_id"],
+        "--type",
+        "worker_done",
+        "--subject",
+        subject,
+        "--body",
+        body,
+        "--task-id",
+        lifecycle["task_id"],
+        "--dispatch-id",
+        lifecycle["dispatch_id"],
+        "--outcome",
+        outcome,
+        "--json",
+    ]
+
+    if executor_result["files"]:
+        cmd.extend([
+            "--files-modified",
+            ",".join(executor_result["files"]),
+        ])
+
+    proc = subprocess.run(
+        cmd,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+
+    if proc.stdout:
+        print(proc.stdout, end="")
+
+    if proc.returncode != 0:
+        if proc.stderr:
+            sys.stderr.write(proc.stderr)
+
+        raise SystemExit(
+            "ERROR: DSH finished but deterministic Orca worker_done "
+            "settlement failed"
+        )
+
+    print("ORCA_DSH_EXECUTOR_WORKER_DONE_SENT")
+
+
 def main():
     parser = argparse.ArgumentParser(
-        description="Run DSH / DeepSeek as an Orca implementation Executor."
+        description=(
+            "Run DSH / DeepSeek as an Orca implementation Executor and "
+            "settle lifecycle from the deterministic outer adapter."
+        )
     )
 
     parser.add_argument(
@@ -83,30 +355,19 @@ def main():
     args = parser.parse_args()
 
     dsh = shutil.which("dsh-orca")
+
     if not dsh:
         raise SystemExit("ERROR: dsh-orca not found in PATH")
 
     preamble = read_text(args.preamble_file)
     task = read_text(args.task_file)
 
-    required_preamble_markers = (
-        "Your task ID is:",
-        "worker_done",
-        "--dispatch-id",
-        "--from",
-    )
+    validate_preamble(preamble)
 
-    missing = [
-        marker
-        for marker in required_preamble_markers
-        if marker not in preamble
-    ]
-
-    if missing:
-        raise SystemExit(
-            "ERROR: preamble is missing required Orca lifecycle markers: "
-            + ", ".join(missing)
-        )
+    try:
+        lifecycle = extract_lifecycle_ids(preamble)
+    except ValueError as exc:
+        raise SystemExit(f"ERROR: {exc}")
 
     if not task.strip():
         raise SystemExit("ERROR: task file is empty")
@@ -115,20 +376,101 @@ def main():
 
     if args.dry_run:
         print(prompt)
-        return
+        return 0
 
-    result = subprocess.run(
-        [
-            dsh,
-            "--profile",
-            "headless",
-            prompt,
-        ],
-        check=False,
+    # Windows CMD wrappers do not preserve multiline positional arguments
+    # reliably.  Store the authoritative full prompt in Orca metadata and
+    # send DSH only a short single-line bootstrap instruction.
+    #
+    # This is also safe on Unix and keeps provider transport deterministic.
+    prompt_dir = Path(args.preamble_file).expanduser().resolve().parent
+    prompt_file = (
+        prompt_dir
+        / (
+            ".dsh-executor-prompt-"
+            + lifecycle["task_id"]
+            + "-"
+            + lifecycle["dispatch_id"]
+            + ".txt"
+        )
     )
 
-    raise SystemExit(result.returncode)
+    prompt_file.write_text(
+        prompt,
+        encoding="utf-8",
+        newline="\n",
+    )
+
+    bootstrap = (
+        "Read the complete authoritative Executor instructions from this "
+        "UTF-8 file and follow them exactly: "
+        + str(prompt_file)
+        + ". Do not infer the task from other workspace files. "
+        "The file contains the complete task and required final-output contract."
+    )
+
+    try:
+        proc = subprocess.run(
+            [
+                dsh,
+                "--profile",
+                "headless",
+                bootstrap,
+            ],
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            check=False,
+        )
+    finally:
+        try:
+            prompt_file.unlink()
+        except FileNotFoundError:
+            pass
+        except OSError as exc:
+            sys.stderr.write(
+                f"WARNING: could not remove temporary DSH prompt file: {exc}\n"
+            )
+
+    output = proc.stdout or ""
+
+    if output:
+        print(output, end="" if output.endswith("\n") else "\n")
+
+    if proc.returncode != 0:
+        executor_result = {
+            "status": "FAILED",
+            "summary": f"DSH process exited with code {proc.returncode}.",
+            "files": [],
+        }
+    else:
+        try:
+            executor_result = parse_executor_result(output)
+        except ValueError as exc:
+            sys.stderr.write(
+                f"ERROR: invalid DSH final output contract: {exc}\n"
+            )
+
+            executor_result = {
+                "status": "FAILED",
+                "summary": (
+                    "DSH returned without a valid deterministic final "
+                    "output contract."
+                ),
+                "files": [],
+            }
+
+    settle_worker_done(lifecycle, executor_result)
+
+    return 0 if executor_result["status"] == "SUCCEEDED" else 1
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())
+
+
+
+
+

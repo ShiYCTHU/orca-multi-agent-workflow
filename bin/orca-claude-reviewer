@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 import argparse
+import os
 from pathlib import Path
 import re
 import shutil
@@ -13,6 +14,13 @@ VALID_VERDICTS = (
     "CHANGES_REQUIRED",
     "ESCALATION_REQUIRED",
 )
+
+
+def orca_cli_name():
+    return os.environ.get(
+        "ORCA_CLI_COMMAND",
+        "orca" if os.name == "nt" else "orca-ide",
+    )
 
 
 def read_text(path):
@@ -45,8 +53,6 @@ def validate_preamble(text):
 
 
 def extract_lifecycle_ids(preamble):
-    import re
-
     task_match = re.search(
         r"(?m)^Your task ID is:\s*(task_[A-Za-z0-9_-]+)\s*$",
         preamble,
@@ -101,21 +107,13 @@ You MUST NOT:
 - silently expand the Task scope;
 - create another Orca Run, Task, or Dispatch;
 - reuse stale lifecycle identifiers;
-- claim tests passed unless you actually verified the cited evidence or ran them;
-- treat documentation style issues as technical failures unless the contract
-  explicitly makes them acceptance criteria.
+- claim tests passed unless you actually verified the cited evidence or ran them.
 
-You may inspect files, diffs, logs, reports, and repository state.
-You may run bounded read-only diagnostics or validation commands when the
-review Task explicitly permits them.
-
-The Orca Dispatch preamble below is authoritative for Task identity and
-lifecycle provenance. Do not send worker_done yourself. The adapter that
-launched you owns lifecycle settlement after parsing your final verdict.
+The deterministic outer adapter owns worker_done settlement.
 
 FINAL OUTPUT CONTRACT
 
-Your final output must contain exactly one final verdict line in this form:
+Your final output must contain exactly one final verdict line:
 
 FINAL_VERDICT: PASS
 
@@ -127,10 +125,6 @@ or:
 
 FINAL_VERDICT: ESCALATION_REQUIRED
 
-Before that line, provide a concise evidence-backed review.
-
-If CHANGES_REQUIRED, enumerate the minimal required fixes.
-If ESCALATION_REQUIRED, state the specific unresolved conflict or ambiguity.
 Do not place any text after the FINAL_VERDICT line.
 
 ================ ORCA DISPATCH PREAMBLE ================
@@ -160,30 +154,26 @@ def extract_verdict(output):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Run Claude / configured GLM backend as an independent Orca Reviewer."
+        description="Run Claude as an independent Orca Reviewer."
     )
 
     parser.add_argument(
         "--preamble-file",
         required=True,
-        help="File containing the exact Orca dispatch preamble.",
     )
 
     parser.add_argument(
         "--task-file",
         required=True,
-        help="File containing the bounded Reviewer task.",
     )
 
     parser.add_argument(
         "--dry-run",
         action="store_true",
-        help="Validate inputs and print the composed review prompt only.",
     )
 
     parser.add_argument(
         "--parse-output",
-        help="Parse an existing reviewer output file and print its verdict.",
     )
 
     args = parser.parse_args()
@@ -195,8 +185,8 @@ def main():
 
     try:
         lifecycle = extract_lifecycle_ids(preamble)
-    except ValueError as e:
-        raise SystemExit(f"ERROR: {e}")
+    except ValueError as exc:
+        raise SystemExit(f"ERROR: {exc}")
 
     if not task.strip():
         raise SystemExit("ERROR: task file is empty")
@@ -206,17 +196,17 @@ def main():
 
         try:
             verdict = extract_verdict(output)
-        except ValueError as e:
-            raise SystemExit(f"ERROR: {e}")
+        except ValueError as exc:
+            raise SystemExit(f"ERROR: {exc}")
 
         print(verdict)
-        return
+        return 0
 
     prompt = build_prompt(preamble, task)
 
     if args.dry_run:
         print(prompt)
-        return
+        return 0
 
     claude = shutil.which("claude")
 
@@ -241,23 +231,23 @@ def main():
     if result.returncode != 0:
         raise SystemExit(result.returncode)
 
-    output = result.stdout
+    output = result.stdout or ""
     print(output, end="")
 
     try:
         verdict = extract_verdict(output)
-    except ValueError as e:
-        raise SystemExit(f"\nERROR: {e}")
+    except ValueError as exc:
+        raise SystemExit(f"\nERROR: {exc}")
 
     body = (
         "Independent review completed under the bounded Orca review task. "
         f"Final verdict: {verdict}. "
-        "The evidence-backed findings are present in the reviewer terminal output."
+        "The evidence-backed findings are present in the reviewer output."
     )
 
     send = subprocess.run(
         [
-            "orca",
+            orca_cli_name(),
             "orchestration",
             "send",
             "--from",
@@ -274,6 +264,7 @@ def main():
             lifecycle["dispatch_id"],
             "--outcome",
             "succeeded",
+            "--json",
         ],
         text=True,
         stdout=subprocess.PIPE,
@@ -281,15 +272,21 @@ def main():
         check=False,
     )
 
+    if send.stdout:
+        print(send.stdout, end="")
+
     if send.returncode != 0:
-        sys.stderr.write(send.stderr)
+        if send.stderr:
+            sys.stderr.write(send.stderr)
+
         raise SystemExit(
-            "\nERROR: reviewer verdict was produced but Orca worker_done settlement failed"
+            "\nERROR: reviewer verdict was produced but Orca "
+            "worker_done settlement failed"
         )
 
-    print()
     print("ORCA_REVIEWER_WORKER_DONE_SENT")
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())
