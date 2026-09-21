@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 
 import argparse
-import fcntl
 import hashlib
 import os
 from pathlib import Path
@@ -10,6 +9,11 @@ import signal
 import subprocess
 import sys
 import time
+
+if os.name == "nt":
+    import msvcrt
+else:
+    import fcntl
 from datetime import datetime
 import json
 
@@ -69,6 +73,8 @@ def _orca_result(cmd, action):
     proc = subprocess.run(
         cmd,
         text=True,
+        encoding="utf-8",
+        errors="replace",
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         timeout=30,
@@ -238,6 +244,8 @@ def _get_run_created_at(run_id):
         proc = subprocess.run(
             cmd,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             timeout=30,
@@ -738,6 +746,10 @@ def parse_status(text):
 def run_kimi(args, state_dir, reason, event_text=""):
     timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
     log_path = state_dir / f"kimi-{timestamp}.log"
+    prompt_path = (
+        state_dir
+        / f"kimi-prompt-{timestamp}-{os.getpid()}.txt"
+    )
 
     prompt = coordinator_prompt(
         args.run,
@@ -746,33 +758,63 @@ def run_kimi(args, state_dir, reason, event_text=""):
         event_text,
     )
 
+    # Windows-safe prompt transport:
+    # never place the full coordinator prompt on the command line.
+    prompt_path.write_text(
+        prompt,
+        encoding="utf-8",
+        errors="replace",
+    )
+
     env = os.environ.copy()
     env["ORCA_SUPERVISOR_MODE"] = "1"
     env["ORCA_SUPERVISOR_RUN"] = args.run
     env["ORCA_SUPERVISOR_PROJECT"] = args.project
 
+    bootstrap = (
+        "You are the KIMI Runtime Coordinator. "
+        "Read the COMPLETE UTF-8 authoritative coordinator prompt from "
+        f"this local file: {prompt_path}. "
+        "Execute that prompt exactly as the coordination instruction for "
+        "this turn. Do not merely summarize the file. "
+        "Inspect durable Orca state, perform the required bounded "
+        "coordination work, and return the required SUPERVISOR_* state."
+    )
+
     cmd = [
-        "claude",
+        require_binary("claude"),
         "--model",
         "opus",
         "--dangerously-skip-permissions",
         "-p",
-        prompt,
+        bootstrap,
     ]
 
     say(f"Invoking KIMI coordinator: reason={reason}")
 
-    proc = subprocess.run(
-        cmd,
-        text=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        env=env,
-        cwd=args.project,
-    )
+    try:
+        proc = subprocess.run(
+            cmd,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            env=env,
+            cwd=args.project,
+        )
+    finally:
+        try:
+            prompt_path.unlink()
+        except OSError:
+            pass
 
     output = proc.stdout or ""
-    log_path.write_text(output, errors="replace")
+    log_path.write_text(
+        output,
+        encoding="utf-8",
+        errors="replace",
+    )
 
     if output.strip():
         print("\n----- KIMI result -----")
@@ -787,7 +829,6 @@ def run_kimi(args, state_dir, reason, event_text=""):
         return None, output
 
     return parse_status(output), output
-
 
 def run_terra(args, state_dir, reason, kimi_result, event_text=""):
     timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
@@ -808,7 +849,7 @@ def run_terra(args, state_dir, reason, kimi_result, event_text=""):
     env["ORCA_SUPERVISOR_PROJECT"] = args.project
 
     cmd = [
-        "codex",
+        require_binary("codex"),
         "exec",
         "--ephemeral",
         "-m",
@@ -831,6 +872,8 @@ def run_terra(args, state_dir, reason, kimi_result, event_text=""):
             cmd,
             input=prompt,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             stdout=log,
             stderr=subprocess.STDOUT,
             env=env,
@@ -902,6 +945,8 @@ def wait_for_event(args):
         proc = subprocess.run(
             cmd,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             timeout=args.wait_sec + 30,
@@ -1065,18 +1110,30 @@ def main():
     state_dir.mkdir(parents=True, exist_ok=True)
 
     lock_path = state_dir / "supervisor-v1.1.lock"
-    lock_file = lock_path.open("w")
+    lock_file = lock_path.open("a+")
+
+    if os.name == "nt":
+        lock_file.seek(0, os.SEEK_END)
+        if lock_file.tell() == 0:
+            lock_file.write("\0")
+            lock_file.flush()
+        lock_file.seek(0)
 
     try:
-        fcntl.flock(
-            lock_file.fileno(),
-            fcntl.LOCK_EX | fcntl.LOCK_NB,
-        )
-    except BlockingIOError:
+        if os.name == "nt":
+            msvcrt.locking(lock_file.fileno(), msvcrt.LK_NBLCK, 1)
+        else:
+            fcntl.flock(
+                lock_file.fileno(),
+                fcntl.LOCK_EX | fcntl.LOCK_NB,
+            )
+    except OSError:
         raise SystemExit(
             f"ERROR: Supervisor already active for {args.run}"
         )
 
+    lock_file.seek(0)
+    lock_file.truncate()
     lock_file.write(str(os.getpid()))
     lock_file.flush()
 
@@ -1209,6 +1266,13 @@ def main():
             if should_stop_for_status(status):
                 say(f"Supervisor pausing on state: {status}")
                 return 0
+
+            if status is None:
+                say(
+                    "KIMI coordination failed; backing off 30 seconds "
+                    "before retrying pending Orca work."
+                )
+                time.sleep(30)
 
             continue
 
