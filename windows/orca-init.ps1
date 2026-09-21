@@ -17,9 +17,23 @@ if ($Executor -and $Executor -eq $Reviewer) {
     throw 'Executor and Reviewer must use different providers.'
 }
 
-$projectRoot = (& git rev-parse --show-toplevel 2>$null)
+$projectRoot = $null
+$currentPath = (Get-Location).Path
+$probe = Get-Item -LiteralPath $currentPath
+
+while ($null -ne $probe) {
+    $gitMarker = Join-Path $probe.FullName '.git'
+
+    if (Test-Path -LiteralPath $gitMarker) {
+        $projectRoot = $probe.FullName
+        break
+    }
+
+    $probe = $probe.Parent
+}
+
 if (-not $projectRoot) {
-    $projectRoot = (Get-Location).Path
+    $projectRoot = $currentPath
 }
 
 $projectRoot = (Resolve-Path $projectRoot).Path
@@ -132,6 +146,91 @@ Do not redefine project goals or silently switch provider roles.
 
     Write-Host "CREATE: $claudeFile"
 }
+
+
+# Install/update the canonical KIMI Runtime Coordinator policy in CLAUDE.md.
+# This is idempotent and applies even when CLAUDE.md already existed.
+
+$coordinatorStart = '<!-- ORCA_KIMI_COORDINATOR_V1_START -->'
+$coordinatorEnd = '<!-- ORCA_KIMI_COORDINATOR_V1_END -->'
+
+$coordinatorLines = @(
+    '<!-- ORCA_KIMI_COORDINATOR_V1_START -->',
+    '',
+    '## KIMI Runtime Coordinator — mandatory Orca policy',
+    '',
+    'When `ORCA_SUPERVISOR_MODE=1` is set, you are the SHORT-LIVED KIMI Runtime Coordinator, not an Executor or Reviewer.',
+    '',
+    'Before performing any orchestration, read the authoritative global workflow files:',
+    '',
+    '- `$HOME/.codex/skills/orca-multi-agent/SKILL.md`',
+    '- `$HOME/.codex/skills/orca-multi-agent/references/current_system.md`',
+    '- `$HOME/.codex/skills/orca-multi-agent/references/workflow.md`',
+    '- the project-local `docs/multi_agent_workflow.md`',
+    '',
+    'The Run frozen role snapshot is authoritative.',
+    '',
+    '### Routing B: DSH Executor -> Claude Reviewer',
+    '',
+    '- DSH Executor MUST run through `orca-dsh-executor`.',
+    '- NEVER launch raw `dsh` or raw `dsh-orca` as the Executor.',
+    '- NEVER use `worker-start --agent dsh`.',
+    '- Create a formal Orca Task and Dispatch to the dedicated Executor terminal.',
+    '- Supply the exact Dispatch preamble and bounded Task to `orca-dsh-executor`.',
+    '- The OUTER adapter owns heartbeat and `worker_done` settlement.',
+    '- The inner DSH process MUST NOT invoke Orca lifecycle commands.',
+    '- Independent Claude review MUST run through `orca-claude-reviewer`.',
+    '',
+    '### Routing A: Claude Executor -> DSH Reviewer',
+    '',
+    '- Claude Executor uses the formal Orca native Claude worker route.',
+    '- DSH Reviewer remains independent and must use the formal DSH review lifecycle.',
+    '- Never silently switch providers because of auth, quota, launcher, or procedural failure.',
+    '',
+    'KIMI must never remain alive waiting for workers, reviewers, monitors, or long simulations.',
+    'When healthy long-running work is active, return `SUPERVISOR_RETURN_ACTIVE`.',
+    '',
+    '<!-- ORCA_KIMI_COORDINATOR_V1_END -->'
+)
+
+$coordinatorBlock = $coordinatorLines -join "`n"
+
+$existingClaude = if (Test-Path $claudeFile) {
+    [System.IO.File]::ReadAllText($claudeFile)
+} else {
+    ''
+}
+
+if (
+    $existingClaude.Contains($coordinatorStart) -and
+    $existingClaude.Contains($coordinatorEnd)
+) {
+    $a = $existingClaude.IndexOf($coordinatorStart)
+    $b = $existingClaude.IndexOf($coordinatorEnd, $a)
+    $b = $b + $coordinatorEnd.Length
+
+    $existingClaude =
+        $existingClaude.Substring(0, $a) +
+        $coordinatorBlock +
+        $existingClaude.Substring($b)
+}
+else {
+    if ($existingClaude.Length -gt 0 -and -not $existingClaude.EndsWith("`n")) {
+        $existingClaude += "`n"
+    }
+
+    $existingClaude += "`n" + $coordinatorBlock + "`n"
+}
+
+$claudeUtf8 = New-Object System.Text.UTF8Encoding($false)
+
+[System.IO.File]::WriteAllText(
+    $claudeFile,
+    $existingClaude.Replace("`r`n", "`n").Replace("`r", "`n"),
+    $claudeUtf8
+)
+
+Write-Host 'KIMI coordinator policy ready in CLAUDE.md.'
 
 Write-Host 'Project layer ready.'
 
