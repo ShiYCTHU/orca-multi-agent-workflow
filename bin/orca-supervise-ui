@@ -117,8 +117,7 @@ echo
 
 orca-supervisor \
     --run "$RUN" \
-    --project "$PROJECT" \
-    --no-initial-kick
+    --project "$PROJECT"
 
 SUPERVISOR_RC=$?
 

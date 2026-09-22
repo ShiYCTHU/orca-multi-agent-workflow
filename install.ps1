@@ -78,6 +78,11 @@ if ($Check) {
         }
     }
     if ($missing) { exit 1 }
+
+    & python (Join-Path $PSScriptRoot 'bin/orca-supervisor') --self-test
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+    Write-Host 'WINDOWS_CHECK: PASS'
     exit 0
 }
 

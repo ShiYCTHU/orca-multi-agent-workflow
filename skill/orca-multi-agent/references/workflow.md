@@ -105,8 +105,10 @@ After a real Run ID exists:
 
     orca-supervisor \
       --run REAL_RUN_ID \
-      --project /real/project/path \
-      --no-initial-kick
+      --project /real/project/path
+
+Fresh startup waits without waking KIMI. Use `--recovery-kick` only when an
+interrupted existing Run needs an immediate `SAME_RUN_RECOVERY` turn.
 
 The deterministic Supervisor owns all long waits.
 

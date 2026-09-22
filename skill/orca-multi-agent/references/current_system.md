@@ -215,8 +215,10 @@ After the REAL Run ID is returned, provide:
 
     orca-supervisor \
       --run REAL_RUN_ID \
-      --project /real/project/path \
-      --no-initial-kick
+      --project /real/project/path
+
+Fresh startup does not wake KIMI. For interrupted existing work that needs an
+immediate durable-state coordination turn, add `--recovery-kick`.
 
 Never put a fake Run ID into an executable command.
 
@@ -476,7 +478,7 @@ orca-supervise-ui --run REAL_RUN_ID --project /absolute/project/path
 This command starts:
 
 1. the read-only Orca Progress Dashboard;
-2. the deterministic orca-supervisor with --no-initial-kick.
+2. the deterministic orca-supervisor, whose fresh-start default does not kick KIMI.
 
 The Dashboard remains optional observability only.
 
@@ -495,7 +497,7 @@ The user may still launch the components separately when needed:
 
 orca-dashboard --run REAL_RUN_ID --project /absolute/project/path
 
-orca-supervisor --run REAL_RUN_ID --project /absolute/project/path --no-initial-kick
+orca-supervisor --run REAL_RUN_ID --project /absolute/project/path
 
 Do not use placeholder Run IDs in executable commands.
 

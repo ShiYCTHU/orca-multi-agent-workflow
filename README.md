@@ -75,8 +75,10 @@ Windows smoke tests:
 
 ```powershell
 powershell.exe -ExecutionPolicy Bypass -File .\install.ps1 -Check
-orca-supervisor --self-test
 ```
+
+The check validates required commands and imports/runs the packaged Supervisor
+with native Windows Python, including the Windows lock implementation.
 
 If your tools run inside WSL rather than native Windows, use the Ubuntu instructions below inside WSL. Do not mix native Windows launchers with WSL executables.
 
@@ -173,8 +175,33 @@ be bound to the target Run. `orca-supervise-ui` performs the required
    ```
 
    The Dashboard remains available if the Supervisor exits. It is observability
-   only and never controls the Run. To run without it, use
-   `orca-supervisor --run REAL_RUN_ID --project /path/to/project --no-initial-kick`.
+   only and never controls the Run. Fresh Supervisor startup does not wake KIMI:
+
+   ```bash
+   orca-supervisor --run REAL_RUN_ID --project /path/to/project
+   ```
+
+   For an interrupted existing Run that needs one immediate durable-state turn:
+
+   ```bash
+   orca-supervisor --run REAL_RUN_ID --project /path/to/project --recovery-kick
+   ```
+
+   `--no-initial-kick` remains accepted as a compatibility no-op.
+
+## Coordinator token-cost controls
+
+Supervisor wakeups pass KIMI a bounded packet containing the Run summary,
+brief Tasks, worker accounting, event excerpt, frozen routing, and current
+Dashboard gate context. The versioned compact contract tells KIMI to load full
+rules or broader project context only when the packet cannot safely resolve the
+turn.
+
+Supervisor-launched KIMI runs outside the project directory, disables slash
+commands, Chrome integration, session persistence, and all configured MCP
+servers. User Claude settings remain available so the configured KIMI backend
+and authentication continue to work. The standalone `orca-kimi` bootstrap keeps
+normal project context but also starts with strict MCP isolation and Chrome off.
 
 ## Smoke tests
 

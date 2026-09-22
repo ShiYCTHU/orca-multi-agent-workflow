@@ -164,7 +164,10 @@ Normal final state:
 
 After the REAL Run ID is known, provide exactly one Supervisor command:
 
-`orca-supervisor --run REAL_RUN_ID --project /real/project/path --no-initial-kick`
+`orca-supervisor --run REAL_RUN_ID --project /real/project/path`
+
+Fresh startup waits without waking KIMI. Use `--recovery-kick` only for an
+interrupted existing Run that needs an immediate `SAME_RUN_RECOVERY` turn.
 
 Never put a fake or placeholder Run ID in an executable command.
 

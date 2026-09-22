@@ -4,4 +4,6 @@ export ORCA_SUPERVISOR_MODE=1
 exec claude \
   --model opus \
   --dangerously-skip-permissions \
+  --strict-mcp-config \
+  --no-chrome \
   "$@"
